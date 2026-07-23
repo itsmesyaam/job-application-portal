@@ -1,0 +1,83 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Position {
+  UI_UX_DESIGNER
+  FULL_STACK_DEVELOPER
+  MOBILE_DEVELOPER
+  TESTER
+  HR
+  DIGITAL_MARKETER
+  INTERN
+}
+
+enum ApplicationStatus {
+  PENDING
+  REVIEWED
+  SHORTLISTED
+  REJECTED
+}
+
+model Candidate {
+  id                String            @id @default(uuid()) @db.Uuid
+  googleId          String            @unique
+  fullName          String
+  email             String            @unique
+  phone             String
+  portfolioUrl      String?
+  resumeUrl         String
+  position          Position
+  yearsOfExperience Int
+  coverLetter       String?           @db.Text
+  status            ApplicationStatus @default(PENDING)
+  createdAt         DateTime          @default(now())
+  
+  messages          Message[]
+  task              Task?
+}
+
+enum SenderType {
+  CANDIDATE
+  ADMIN
+}
+
+enum TaskStatus {
+  ASSIGNED
+  SUBMITTED
+  OVERDUE
+  ACCEPTED
+  REJECTED
+}
+
+model Message {
+  id            String     @id @default(uuid()) @db.Uuid
+  candidateId   String     @db.Uuid
+  candidate     Candidate  @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  senderType    SenderType
+  content       String     @db.Text
+  attachmentUrl String?
+  createdAt     DateTime   @default(now())
+  isRead        Boolean    @default(false)
+}
+
+model Task {
+  id              String     @id @default(uuid()) @db.Uuid
+  candidateId     String     @unique @db.Uuid
+  candidate       Candidate  @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  title           String
+  instructions    String     @db.Text
+  taskFileUrl     String?
+  assignedAt      DateTime   @default(now())
+  deadline        DateTime
+  submissionUrl   String?
+  submissionNotes String?    @db.Text
+  submittedAt     DateTime?
+  status          TaskStatus @default(ASSIGNED)
+  reminderSent    Boolean    @default(false)
+}

@@ -1,0 +1,39 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# Next.js build output and exports
+/.next/
+/out/
+/build
+/dist
+
+# Testing coverage
+/coverage
+
+# System files & logs
+.DS_Store
+*.pem
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.tsbuildinfo
+
+# Environment variables (Excludes local files with secret keys, keeps .env.example tracked)
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env
+
+# Firebase CLI configs & local emulator debug logs
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# Vercel deployments cache
+.vercel

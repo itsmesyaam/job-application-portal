@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: acme-postgres-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: production-secure-db-password-123
+      POSTGRES_DB: job_posting_manager
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acme-career-portal
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:production-secure-db-password-123@db:5432/job_posting_manager?schema=public
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: production-secure-nextauth-secret-key-32-chars
+      GOOGLE_CLIENT_ID: your-production-google-client-id
+      GOOGLE_CLIENT_SECRET: your-production-google-client-secret
+      ADMIN_EMAILS: admin@example.com
+      CRON_SECRET: production-secure-cron-secret-token-xyz
+      AWS_S3_REGION: us-west-1
+      AWS_S3_BUCKET_NAME: career-resumes
+      AWS_ACCESS_KEY_ID: your-aws-key
+      AWS_SECRET_ACCESS_KEY: your-aws-secret
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "npx prisma db push && node server.js"
+
+volumes:
+  pgdata:
