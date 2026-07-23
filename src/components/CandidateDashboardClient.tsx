@@ -5,8 +5,9 @@ import { useRouter } from 'next/navigation';
 import { 
   Send, FileText, Link2, LogOut, CheckCircle2, 
   XCircle, AlertCircle, Clock, Check, Sparkles, Upload, Loader2,
-  Mail
+  Mail, Lock
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 import { createClient } from '@/lib/supabase/client';
 import { Toast, type ToastType } from './Toast';
@@ -59,6 +60,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
   // Countdown Timer State
   const [timeLeft, setTimeLeft] = useState<string>('--:--:--');
   const [isUrgent, setIsUrgent] = useState<boolean>(false);
+  const [isGlow, setIsGlow] = useState<boolean>(false);
 
   // Task Submission Form State
   const [submittingTask, setSubmittingTask] = useState(false);
@@ -170,6 +172,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
       if (difference <= 0) {
         setTimeLeft('EXPIRED');
         setIsUrgent(false);
+        setIsGlow(false);
         setTask((t) => (t ? { ...t, status: 'OVERDUE' } : null));
         showToast('Assignment deadline has passed. Submissions locked.', 'error');
         return;
@@ -185,6 +188,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
 
       setTimeLeft(`${formattedHours}:${formattedMinutes}:${formattedSeconds}`);
       setIsUrgent(hours < 2);
+      setIsGlow(hours < 12);
     };
 
     updateTimer();
@@ -200,7 +204,6 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
     setSendingMsg(true);
     try {
       const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
-      
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -214,41 +217,54 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
 
       if (!response.ok) throw new Error();
       const data = await response.json();
-      
       if (data.success) {
         setNewMessage('');
       }
     } catch {
-      showToast('Could not deliver message.', 'error');
+      showToast('Failed to dispatch message.', 'error');
     } finally {
       setSendingMsg(false);
     }
   };
 
-  // 4. Submit Task Handler
+  // Logout / Terminate Session
+  const handleLogout = async () => {
+    const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
+    if (!isGlow && !isDemo) {
+      await supabase.auth.signOut();
+    }
+    showToast('Signed out of Candidate Space.', 'info');
+    setTimeout(() => {
+      router.push('/');
+      router.refresh();
+    }, 500);
+  };
+
+  // Submit Challenge Solutions
   const handleSubmitTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submittingTask) return;
 
     if (!submitFile && !submitUrl.trim()) {
-      showToast('Please upload a submission file or paste a link.', 'error');
+      showToast('Please select a solution zip file or paste your repository link.', 'error');
       return;
     }
 
     setSubmittingTask(true);
     try {
-      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
       const formData = new FormData();
       formData.append('candidateId', candidate.id);
       formData.append('submissionNotes', submitNotes);
+      
+      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
       if (isDemo) {
         formData.append('isDemo', 'true');
       }
-      
+
       if (submitFile) {
         formData.append('file', submitFile);
       } else {
-        formData.append('url', submitUrl);
+        formData.append('url', submitUrl.trim());
       }
 
       const response = await fetch('/api/tasks/submit', {
@@ -256,59 +272,63 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
         body: formData,
       });
 
-      const data = await response.json();
-
-      if (response.ok && data.success) {
-        showToast('Assignment submitted successfully!', 'success');
-        setTask(data.task);
-      } else {
-        showToast(data.error || 'Submission failed. Please check file properties.', 'error');
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Submission failed.');
       }
-    } catch {
-      showToast('Could not connect to submission servers.', 'error');
+
+      const data = await response.json();
+      if (data.success) {
+        showToast('Challenge solution delivered successfully!', 'success');
+        setTask(data.task);
+      }
+    } catch (error: any) {
+      console.error(error);
+      showToast(error.message || 'Submission delivery failed.', 'error');
     } finally {
       setSubmittingTask(false);
     }
   };
 
-  const handleSignOut = async () => {
-    await supabase.auth.signOut();
-    router.push('/');
+  const statusColorsMap = {
+    PENDING: { bg: 'bg-amber-500/10 border-amber-500/20 text-amber-400', desc: 'Your profile registration is verified. Hiring managers are currently reviewing your documents.' },
+    SHORTLISTED: { bg: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400', desc: 'Congratulations! Your profile has been shortlisted. Technical challenges will be assigned here soon.' },
+    TASK_ASSIGNED: { bg: 'bg-violet-500/10 border-violet-500/20 text-violet-400', desc: 'You have a pending technical assignment task. Please complete it within the 48-hour window.' },
+    SUBMITTED: { bg: 'bg-blue-500/10 border-blue-500/20 text-blue-400', desc: 'Task solution delivered successfully! Hiring managers are currently reviewing your workspace.' },
+    REJECTED: { bg: 'bg-rose-500/10 border-rose-500/20 text-rose-400', desc: 'Application review completed. Acme Enterprise decided not to proceed further at this time.' }
   };
 
-  const statusColors = {
-    PENDING: { bg: 'bg-amber-500/10 border-amber-500/20 text-amber-400', desc: 'Your application has been received and is currently under review by our hiring managers.' },
-    SHORTLISTED: { bg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400', desc: 'Congratulations! You have been shortlisted. We are reviewing details to assign you a take-home task.' },
-    TASK_ASSIGNED: { bg: 'bg-violet-500/10 border-violet-500/20 text-violet-400', desc: 'You have a pending technical assignment task. Please complete it within the 48-hour window.' },
-    SUBMITTED: { bg: 'bg-blue-500/10 border-blue-500/20 text-blue-400', desc: 'Your take-home assignment has been submitted successfully and is currently under review.' },
-    REJECTED: { bg: 'bg-rose-500/10 border-rose-500/20 text-rose-400', desc: 'Thank you for your interest in joining us. Our team decided not to move forward with your application.' },
-  }[candidate.status];
+  const statusColors = statusColorsMap[candidate.status] || statusColorsMap.PENDING;
 
   return (
-    <div className="relative min-h-screen flex flex-col justify-between overflow-x-hidden bg-slate-950 text-slate-100 font-sans">
-      {/* Glow Effects */}
+    <div className="relative min-h-screen flex flex-col justify-between overflow-x-hidden bg-slate-950 text-slate-100">
+      {/* Background Gradient mesh */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-[600px] pointer-events-none">
-        <div className="absolute top-[-10%] left-[5%] w-[45%] h-[60%] rounded-full bg-indigo-600/5 blur-[120px]" />
-        <div className="absolute top-[-5%] right-[10%] w-[40%] h-[50%] rounded-full bg-violet-600/5 blur-[120px]" />
+        <div className="absolute top-[-10%] left-[10%] w-[40%] h-[50%] rounded-full bg-indigo-600/5 blur-[120px]" />
+        <div className="absolute top-[-5%] right-[15%] w-[35%] h-[45%] rounded-full bg-violet-600/5 blur-[120px]" />
       </div>
 
       {/* Header */}
       <header className="w-full border-b border-slate-900 bg-slate-950/60 backdrop-blur-md relative z-20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-indigo-500/10 border border-indigo-500/20 rounded-xl flex items-center justify-center text-indigo-400 font-bold text-base">
+            <div className="w-9 h-9 bg-indigo-500/10 border border-indigo-500/20 rounded-xl flex items-center justify-center text-indigo-400 font-bold text-base shadow-[0_0_15px_rgba(99,102,241,0.05)]">
               A
             </div>
             <div>
               <h1 className="text-sm font-bold text-slate-200">Acme Careers</h1>
-              <p className="text-[10px] text-slate-500 font-semibold tracking-wider uppercase">Applicant Dashboard</p>
+              <p className="text-[10px] text-slate-500 font-semibold tracking-wider uppercase">Candidate Space</p>
             </div>
           </div>
-          
+
           <div className="flex items-center gap-4">
-            <button
-              onClick={handleSignOut}
-              className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg border border-slate-800 bg-slate-900/10 text-xs font-semibold text-slate-400 hover:text-slate-200 hover:border-slate-700 transition-all cursor-pointer"
+            <div className="text-right hidden sm:block">
+              <p className="text-xs font-semibold text-slate-200">{candidate.fullName}</p>
+              <p className="text-[10px] text-indigo-400 font-medium">{candidate.position}</p>
+            </div>
+            <button 
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-slate-800 bg-slate-900/10 text-xs font-semibold text-slate-400 hover:text-rose-400 hover:border-rose-500/20 transition-all cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" /> Sign Out
             </button>
@@ -316,26 +336,23 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
         </div>
       </header>
 
-      {/* Main Grid Layout */}
+      {/* Main Content */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 relative z-10 grid grid-cols-1 lg:grid-cols-3 gap-8">
         
-        {/* Left 2 Columns: Application & Challenge */}
-        <div className="lg:col-span-2 space-y-6">
-          
-          {/* Candidate Profile Details Card */}
-          <div className="border border-slate-800 bg-slate-900/40 backdrop-blur-xl rounded-2xl p-6 shadow-xl relative overflow-hidden">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="space-y-1">
-                <p className="text-[10px] text-slate-500 font-bold tracking-wider uppercase">Welcome back</p>
-                <h2 className="text-2xl font-bold tracking-tight text-white">{candidate.fullName}</h2>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="text-xs text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-2.5 py-0.5 rounded-full font-semibold">
-                    {candidate.position}
-                  </span>
-                  <span className="text-xs text-slate-500">
-                    &bull; Applied on {new Date(candidate.createdAt).toLocaleDateString()}
-                  </span>
-                </div>
+        {/* Left 2 Columns: Task & Info Panel */}
+        <div className="lg:col-span-2 space-y-8">
+          {/* Welcome Dashboard Block */}
+          <div className="border border-slate-850 bg-slate-900/20 backdrop-blur-xl p-6 sm:p-8 rounded-2xl relative overflow-hidden shadow-lg">
+            <div className="absolute top-[-40px] right-[-40px] w-40 h-40 bg-indigo-500/5 rounded-full blur-[60px]" />
+            
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+              <div className="space-y-2">
+                <h2 className="text-xl sm:text-2xl font-bold text-slate-100 flex items-center gap-2">
+                  Welcome back, {candidate.fullName.split(' ')[0]}! <Sparkles className="w-5 h-5 text-indigo-400" />
+                </h2>
+                <p className="text-xs text-slate-400 max-w-md">
+                  Track your application checkpoints, review assigned programming exercises, or correspond with coordinators.
+                </p>
               </div>
 
               {/* Status Badge */}
@@ -359,10 +376,12 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
 
                 {/* Countdown Block */}
                 {task.status === 'ASSIGNED' && (
-                  <div className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl border backdrop-blur-xl
-                    ${isUrgent 
-                      ? 'bg-rose-500/10 border-rose-500/30 text-rose-400 animate-pulse shadow-[0_0_15px_rgba(239,68,68,0.15)]' 
-                      : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400'
+                  <div className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl border backdrop-blur-xl transition-all duration-300
+                    ${isGlow 
+                      ? 'bg-rose-500/10 border-rose-500/40 text-rose-400 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.25)]' 
+                      : isUrgent
+                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                        : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400'
                     }`}
                   >
                     <Clock className="w-4 h-4" />
@@ -407,108 +426,136 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
                   </div>
                 </div>
 
-                {/* Submissions form logic */}
-                {task.status === 'ASSIGNED' && (
-                  <form onSubmit={handleSubmitTask} className="border-t border-slate-800 pt-6 space-y-5">
-                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Submit Assignment</h4>
-                    
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {/* Submission Link option */}
-                      <div className="space-y-1.5">
-                        <label htmlFor="url" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                          Pasted URL (GitHub / Figma / Live link)
-                        </label>
-                        <div className="relative">
-                          <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-600">
-                            <Link2 className="w-4 h-4" />
-                          </span>
-                          <input
-                            type="url"
-                            id="url"
-                            placeholder="https://github.com/..."
-                            value={submitUrl}
-                            onChange={(e) => { setSubmitUrl(e.target.value); setSubmitFile(null); }}
-                            className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs"
-                          />
-                        </div>
-                      </div>
-
-                      {/* File Upload option */}
-                      <div className="space-y-1.5">
-                        <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                          Or Upload Archive file (ZIP/PDF up to 10MB)
-                        </label>
-                        <div className="flex items-center gap-3">
-                          <input
-                            type="file"
-                            id="submitFile"
-                            accept=".zip,.pdf"
-                            className="hidden"
-                            onChange={(e) => {
-                              if (e.target.files && e.target.files.length > 0) {
-                                setSubmitFile(e.target.files[0]);
-                                setSubmitUrl('');
-                              }
-                            }}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => document.getElementById('submitFile')?.click()}
-                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-800 bg-slate-900/20 text-slate-300 hover:text-white hover:border-slate-700 text-xs font-semibold cursor-pointer"
-                          >
-                            <Upload className="w-4 h-4" /> {submitFile ? 'Change file' : 'Select file'}
-                          </button>
-                          {submitFile && (
-                            <span className="text-xs text-slate-400 truncate max-w-[150px]" title={submitFile.name}>
-                              {submitFile.name}
+                {/* Submissions form logic with Lockout screen animation */}
+                <AnimatePresence mode="wait">
+                  {task.status === 'ASSIGNED' ? (
+                    <motion.form 
+                      key="submission-form"
+                      initial={{ opacity: 1 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      onSubmit={handleSubmitTask} 
+                      className="border-t border-slate-800 pt-6 space-y-5"
+                    >
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Submit Assignment</h4>
+                      
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {/* Submission Link option */}
+                        <div className="space-y-1.5">
+                          <label htmlFor="url" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                            Pasted URL (GitHub / Figma / Live link)
+                          </label>
+                          <div className="relative">
+                            <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-600">
+                              <Link2 className="w-4 h-4" />
                             </span>
-                          )}
+                            <input
+                              type="url"
+                              id="url"
+                              placeholder="https://github.com/..."
+                              value={submitUrl}
+                              onChange={(e) => { setSubmitUrl(e.target.value); setSubmitFile(null); }}
+                              className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs"
+                            />
+                          </div>
+                        </div>
+
+                        {/* File Upload option */}
+                        <div className="space-y-1.5">
+                          <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                            Or Upload Archive file (ZIP/PDF up to 10MB)
+                          </label>
+                          <div className="flex items-center gap-3">
+                            <input
+                              type="file"
+                              id="submitFile"
+                              accept=".zip,.pdf"
+                              className="hidden"
+                              onChange={(e) => {
+                                if (e.target.files && e.target.files.length > 0) {
+                                  setSubmitFile(e.target.files[0]);
+                                  setSubmitUrl('');
+                                }
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => document.getElementById('submitFile')?.click()}
+                              className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-800 bg-slate-900/20 text-slate-300 hover:text-white hover:border-slate-700 text-xs font-semibold cursor-pointer"
+                            >
+                              <Upload className="w-4 h-4" /> {submitFile ? 'Change file' : 'Select file'}
+                            </button>
+                            {submitFile && (
+                              <span className="text-xs text-slate-400 truncate max-w-[150px]" title={submitFile.name}>
+                                {submitFile.name}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    {/* Submission Notes */}
-                    <div className="space-y-1.5">
-                      <label htmlFor="notes" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                        Submission Notes
-                      </label>
-                      <textarea
-                        id="notes"
-                        rows={4}
-                        placeholder="Detail any deployment URLs, execution instructions, or special challenges completed..."
-                        value={submitNotes}
-                        onChange={(e) => setSubmitNotes(e.target.value)}
-                        className="w-full px-4 py-3 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs resize-none"
-                      />
-                    </div>
+                      {/* Submission Notes */}
+                      <div className="space-y-1.5">
+                        <label htmlFor="notes" className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                          Submission Notes
+                        </label>
+                        <textarea
+                          id="notes"
+                          rows={4}
+                          placeholder="Detail any deployment URLs, execution instructions, or special challenges completed..."
+                          value={submitNotes}
+                          onChange={(e) => setSubmitNotes(e.target.value)}
+                          className="w-full px-4 py-3 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs resize-none"
+                        />
+                      </div>
 
-                    <div className="flex items-center justify-end">
-                      <button
-                        type="submit"
-                        disabled={submittingTask}
-                        className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {submittingTask ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading...
-                          </>
-                        ) : (
-                          <>
-                            Submit Challenge <Check className="w-3.5 h-3.5" />
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </form>
-                )}
+                      <div className="flex items-center justify-end">
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          type="submit"
+                          disabled={submittingTask}
+                          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {submittingTask ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading...
+                            </>
+                          ) : (
+                            <>
+                              Submit Challenge <Check className="w-3.5 h-3.5" />
+                            </>
+                          )}
+                        </motion.button>
+                      </div>
+                    </motion.form>
+                  ) : task.status === 'OVERDUE' ? (
+                    <motion.div 
+                      key="lock-screen"
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ duration: 0.3 }}
+                      className="border-t border-slate-850 pt-6 flex flex-col items-center justify-center p-8 text-center space-y-4"
+                    >
+                      <div className="w-14 h-14 bg-rose-500/10 border border-rose-500/20 rounded-2xl flex items-center justify-center text-rose-450 shadow-[0_0_15px_rgba(239,68,68,0.1)]">
+                        <Lock className="w-7 h-7" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-200">Submissions Locked</h4>
+                        <p className="text-xs text-slate-400 mt-1 max-w-sm leading-relaxed">
+                          The 48-hour technical assignment window has expired. Submissions are no longer accepted for review.
+                        </p>
+                      </div>
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
 
                 {/* Submission display for Submitted states */}
-                {task.status !== 'ASSIGNED' && task.submittedAt && (
+                {task.status !== 'ASSIGNED' && task.status !== 'OVERDUE' && task.submittedAt && (
                   <div className="border-t border-slate-850 pt-6 space-y-4">
                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Your Submission</h4>
                     
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div className="p-4 rounded-xl border border-slate-850 bg-slate-950/30 flex items-center justify-between">
+                      <div className="p-4 rounded-xl border border-slate-855 bg-slate-955/30 flex items-center justify-between">
                         <div className="flex items-center gap-2.5 truncate">
                           <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400">
                             <FileText className="w-4 h-4" />
@@ -528,7 +575,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
                         </a>
                       </div>
 
-                      <div className="p-4 rounded-xl border border-slate-850 bg-slate-950/30">
+                      <div className="p-4 rounded-xl border border-slate-855 bg-slate-955/30">
                         <p className="text-[10px] text-slate-500 font-bold uppercase leading-none">Submitted On</p>
                         <p className="text-xs font-semibold text-slate-200 mt-1.5">
                           {new Date(task.submittedAt).toLocaleString()}
@@ -539,7 +586,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
                     {task.submissionNotes && (
                       <div className="space-y-1">
                         <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Submission Notes</p>
-                        <p className="text-xs text-slate-300 p-3 rounded-lg border border-slate-900 bg-slate-950/20 leading-relaxed whitespace-pre-wrap">
+                        <p className="text-xs text-slate-300 p-3 rounded-lg border border-slate-900 bg-slate-955/20 leading-relaxed whitespace-pre-wrap">
                           {task.submissionNotes}
                         </p>
                       </div>
@@ -583,59 +630,67 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
             </div>
           </div>
 
-          {/* Chat Messages Feed */}
+          {/* Chat Messages Feed with Framer Motion layout transitions */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-slate-950/10">
-            {messages.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center p-4">
-                <Mail className="w-8 h-8 text-slate-600 mb-2" />
-                <p className="text-xs font-semibold text-slate-400">Start the conversation</p>
-                <p className="text-[10px] text-slate-500 mt-1 max-w-[180px]">
-                  Send a message to HR if you have questions regarding the challenge.
-                </p>
-              </div>
-            ) : (
-              messages.map((msg) => {
-                const isAdminMsg = msg.senderType === 'ADMIN';
-                return (
-                  <div 
-                    key={msg.id}
-                    className={`flex flex-col max-w-[80%] ${isAdminMsg ? 'mr-auto items-start' : 'ml-auto items-end'}`}
-                  >
-                    <div 
-                      className={`p-3 rounded-2xl text-xs leading-relaxed
-                        ${isAdminMsg 
-                          ? 'bg-slate-900 border border-slate-850 text-slate-200 rounded-tl-none' 
-                          : 'bg-indigo-600 text-white rounded-tr-none shadow-[0_0_10px_rgba(99,102,241,0.1)]'
-                        }`}
+            <AnimatePresence initial={false}>
+              {messages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center p-4">
+                  <Mail className="w-8 h-8 text-slate-600 mb-2" />
+                  <p className="text-xs font-semibold text-slate-400">Start the conversation</p>
+                  <p className="text-[10px] text-slate-500 mt-1 max-w-[180px]">
+                    Send a message to HR if you have questions regarding the challenge.
+                  </p>
+                </div>
+              ) : (
+                messages.map((msg) => {
+                  const isAdminMsg = msg.senderType === 'ADMIN';
+                  return (
+                    <motion.div 
+                      key={msg.id}
+                      layout
+                      initial={{ opacity: 0, y: 15, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+                      className={`flex flex-col max-w-[80%] ${isAdminMsg ? 'mr-auto items-start' : 'ml-auto items-end'}`}
                     >
-                      {msg.content}
-                    </div>
-                    <span className="text-[9px] text-slate-500 mt-1 font-medium px-1">
-                      {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  </div>
-                );
-              })
-            )}
+                      <div 
+                        className={`p-3 rounded-2xl text-xs leading-relaxed
+                          ${isAdminMsg 
+                            ? 'bg-slate-900 border border-slate-855 text-slate-200 rounded-tl-none' 
+                            : 'bg-indigo-600 text-white rounded-tr-none shadow-[0_0_10px_rgba(99,102,241,0.1)]'
+                          }`}
+                      >
+                        {msg.content}
+                      </div>
+                      <span className="text-[9px] text-slate-500 mt-1 font-medium px-1">
+                        {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </motion.div>
+                  );
+                })
+              )}
+            </AnimatePresence>
             <div ref={chatBottomRef} />
           </div>
 
           {/* Chat Input form */}
-          <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-850 bg-slate-950/40 flex gap-2 flex-shrink-0">
+          <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-855 bg-slate-955/40 flex gap-2 flex-shrink-0">
             <input
               type="text"
               placeholder="Type message here..."
               value={newMessage}
               onChange={(e) => setNewMessage(e.target.value)}
-              className="flex-1 px-4 py-2.5 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs"
+              className="flex-1 px-4 py-2.5 rounded-xl border border-slate-800 bg-slate-955/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs"
             />
-            <button
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
               type="submit"
               disabled={!newMessage.trim() || sendingMsg}
               className="p-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer flex items-center justify-center"
             >
               {sendingMsg ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            </button>
+            </motion.button>
           </form>
 
         </div>

@@ -5,6 +5,7 @@ import {
   Search, Briefcase, Filter, ChevronLeft, ChevronRight, 
   Users, Sparkles, CheckCircle2, AlertCircle, XCircle, ArrowUpDown
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { CandidateDrawer } from './CandidateDrawer';
 import { Toast, type ToastType } from './Toast';
 
@@ -269,7 +270,7 @@ export function CandidateTable() {
         <div className="overflow-x-auto w-full">
           <table className="w-full text-left border-collapse">
             <thead>
-              <tr className="border-b border-slate-850 text-slate-400 bg-slate-950/10 text-[10px] uppercase tracking-wider font-semibold">
+              <tr className="border-b border-slate-855 text-slate-400 bg-slate-950/10 text-[10px] uppercase tracking-wider font-semibold">
                 <th className="p-4 pl-6">Applicant Name</th>
                 <th className="p-4">Applied Position</th>
                 <th className="p-4 flex items-center gap-1 cursor-default">
@@ -280,7 +281,7 @@ export function CandidateTable() {
                 <th className="p-4 pr-6 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-850 text-slate-300 text-xs">
+            <tbody className="divide-y divide-slate-855 text-slate-300 text-xs">
               {loading ? (
                 Array.from({ length: 5 }).map((_, idx) => (
                   <tr key={idx} className="animate-pulse">
@@ -312,38 +313,45 @@ export function CandidateTable() {
                   </td>
                 </tr>
               ) : (
-                candidates.map((candidate) => (
-                  <tr 
-                    key={candidate.id} 
-                    onClick={() => { setSelectedCandidate(candidate); setIsDrawerOpen(true); }}
-                    className="hover:bg-slate-950/20 transition-all cursor-pointer group"
-                  >
-                    <td className="p-4 pl-6">
-                      <p className="font-semibold text-slate-200 group-hover:text-indigo-400 transition-colors">{candidate.fullName}</p>
-                      <p className="text-[10px] text-slate-500 mt-0.5">{candidate.email}</p>
-                    </td>
-                    <td className="p-4 font-medium">{candidate.position}</td>
-                    <td className="p-4">{candidate.yearsOfExperience} {candidate.yearsOfExperience === 1 ? 'year' : 'years'}</td>
-                    <td className="p-4 text-slate-400">
-                      {new Date(candidate.createdAt).toLocaleDateString(undefined, { 
-                        month: 'short', day: 'numeric', year: 'numeric' 
-                      })}
-                    </td>
-                    <td className="p-4">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold border ${statusBadges[candidate.status]}`}>
-                        {candidate.status}
-                      </span>
-                    </td>
-                    <td className="p-4 pr-6 text-right" onClick={(e) => e.stopPropagation()}>
-                      <button 
-                        onClick={() => { setSelectedCandidate(candidate); setIsDrawerOpen(true); }}
-                        className="px-3 py-1.5 rounded-lg border border-slate-800 text-[10px] font-semibold hover:border-indigo-500 hover:text-indigo-400 transition-all cursor-pointer"
-                      >
-                        Inspect
-                      </button>
-                    </td>
-                  </tr>
-                ))
+                <AnimatePresence mode="popLayout">
+                  {candidates.map((candidate) => (
+                    <motion.tr 
+                      key={candidate.id} 
+                      layout
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -8 }}
+                      transition={{ duration: 0.2 }}
+                      onClick={() => { setSelectedCandidate(candidate); setIsDrawerOpen(true); }}
+                      className="hover:bg-slate-950/20 transition-all cursor-pointer group"
+                    >
+                      <td className="p-4 pl-6">
+                        <p className="font-semibold text-slate-200 group-hover:text-indigo-400 transition-colors">{candidate.fullName}</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">{candidate.email}</p>
+                      </td>
+                      <td className="p-4 font-medium">{candidate.position}</td>
+                      <td className="p-4">{candidate.yearsOfExperience} {candidate.yearsOfExperience === 1 ? 'year' : 'years'}</td>
+                      <td className="p-4 text-slate-400">
+                        {new Date(candidate.createdAt).toLocaleDateString(undefined, { 
+                          month: 'short', day: 'numeric', year: 'numeric' 
+                        })}
+                      </td>
+                      <td className="p-4">
+                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold border ${statusBadges[candidate.status]}`}>
+                          {candidate.status}
+                        </span>
+                      </td>
+                      <td className="p-4 pr-6 text-right" onClick={(e) => e.stopPropagation()}>
+                        <button 
+                          onClick={() => { setSelectedCandidate(candidate); setIsDrawerOpen(true); }}
+                          className="px-3 py-1.5 rounded-lg border border-slate-800 text-[10px] font-semibold hover:border-indigo-500 hover:text-indigo-400 transition-all cursor-pointer"
+                        >
+                          Inspect
+                        </button>
+                      </td>
+                    </motion.tr>
+                  ))}
+                </AnimatePresence>
               )}
             </tbody>
           </table>
