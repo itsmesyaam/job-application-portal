@@ -6,13 +6,13 @@ import {
   Eye, Download, Loader2, Send, 
   MessageSquare, Sparkles, Clock, ArrowRight
 } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
 import { type Candidate } from './CandidateTable';
 
 interface TaskDetails {
   id: string;
   title: string;
   instructions: string;
-  taskFileUrl?: string;
   assignedAt: string;
   deadline: string;
   submissionUrl?: string;
@@ -37,6 +37,7 @@ interface CandidateDrawerProps {
 }
 
 export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: CandidateDrawerProps) {
+  const [supabase] = useState(() => createClient());
   const [activeTab, setActiveTab] = useState<'info' | 'task' | 'chat'>('info');
   
   // Task State
@@ -55,15 +56,17 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
   const [unreadCount, setUnreadCount] = useState(0);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Status Change State (for candidate general status)
+  // Status Change State
   const [updatingCandidate, setUpdatingCandidate] = useState<string | null>(null);
+  const [signedResumeUrl, setSignedResumeUrl] = useState<string | null>(null);
 
   // Fetch Task Details
   const fetchTask = useCallback(async () => {
     if (!candidate) return;
     setLoadingTask(true);
     try {
-      const response = await fetch(`/api/tasks?candidateId=${candidate.id}`);
+      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
+      const response = await fetch(`/api/tasks?candidateId=${candidate.id}${isDemo ? '&isDemo=true' : ''}`);
       if (!response.ok) throw new Error();
       const data = await response.json();
       if (data.success) {
@@ -76,55 +79,116 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
     }
   }, [candidate]);
 
-  // Fetch Chat Feed & Unread Counts
-  const fetchMessages = useCallback(async () => {
-    if (!candidate) return;
-    try {
-      const response = await fetch(`/api/chat?candidateId=${candidate.id}`);
-      if (!response.ok) throw new Error();
-      const data = await response.json();
-      if (data.success) {
-        setMessages(data.messages);
-        
-        // Count unread candidate messages (only if we aren't currently viewing the chat tab)
+  // Fetch initial messages and subscribe to Supabase Realtime chat channel
+  useEffect(() => {
+    if (!candidate || !isOpen) return;
+
+    // 1. Fetch initial message history
+    const loadMessages = async () => {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('candidate_id', candidate.id)
+        .order('created_at', { ascending: true });
+
+      if (error) {
+        console.error('Error loading chat history:', error);
+        return;
+      }
+
+      if (data) {
+        setMessages(
+          data.map((m: any) => ({
+            id: m.id,
+            content: m.content,
+            senderType: m.sender_type,
+            createdAt: m.created_at,
+            isRead: m.is_read,
+          }))
+        );
+
         if (activeTab !== 'chat') {
-          const unread = data.messages.filter(
-            (m: ChatMessage) => m.senderType === 'CANDIDATE' && !m.isRead
+          const unread = data.filter(
+            (m: any) => m.sender_type === 'CANDIDATE' && !m.is_read
           ).length;
           setUnreadCount(unread);
-        } else {
-          setUnreadCount(0);
         }
       }
-    } catch (e) {
-      console.error('Error syncing chat feed:', e);
-    }
-  }, [candidate, activeTab]);
-
-  // Poll Chat Messages & fetch tasks on open
-  useEffect(() => {
-    if (!isOpen || !candidate) return;
-
-    const timer = setTimeout(() => {
-      fetchTask();
-      fetchMessages();
-    }, 0);
-
-    const interval = setInterval(fetchMessages, 4000);
-    return () => {
-      clearTimeout(timer);
-      clearInterval(interval);
     };
-  }, [isOpen, candidate, fetchTask, fetchMessages]);
+
+    loadMessages();
+    fetchTask();
+
+    // 2. Subscribe to Postgres INSERTs for chat updates
+    const channel = supabase
+      .channel(`admin_chat_channel:${candidate.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `candidate_id=eq.${candidate.id}`,
+        },
+        (payload) => {
+          const newMsg = payload.new as any;
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === newMsg.id)) return prev;
+            return [
+              ...prev,
+              {
+                id: newMsg.id,
+                content: newMsg.content,
+                senderType: newMsg.sender_type,
+                createdAt: newMsg.created_at,
+                isRead: newMsg.is_read,
+              },
+            ];
+          });
+
+          if (activeTab !== 'chat' && newMsg.sender_type === 'CANDIDATE') {
+            setUnreadCount((c) => c + 1);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [supabase, candidate, isOpen, activeTab, fetchTask]);
+
+  // Generate private S3/Supabase Storage signed URL for resume review on mount
+  useEffect(() => {
+    if (!candidate || !isOpen) return;
+
+    const getSignedUrl = async () => {
+      // In local demo simulation mode, use a mock URL
+      if (candidate.id === '00000000-0000-0000-0000-000000000000') {
+        setSignedResumeUrl(candidate.resumeUrl);
+        return;
+      }
+
+      const { data, error } = await supabase.storage
+        .from('resumes')
+        .createSignedUrl(candidate.resumeUrl, 3600); // 1 hour expiry
+
+      if (error) {
+        console.error('Error generating signed URL:', error);
+        setSignedResumeUrl(candidate.resumeUrl); // Fallback to raw string
+      } else if (data) {
+        setSignedResumeUrl(data.signedUrl);
+      }
+    };
+
+    getSignedUrl();
+  }, [supabase, candidate, isOpen]);
 
   // Scroll chat tab to bottom when active
   useEffect(() => {
     if (activeTab === 'chat') {
       chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-      const timer = setTimeout(() => {
-        setUnreadCount(0); // reset unread count when viewed
-      }, 0);
-      return () => clearTimeout(timer);
+      setUnreadCount(0);
     }
   }, [activeTab, messages]);
 
@@ -189,8 +253,8 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
       const data = await response.json();
       if (data.success) {
         setTask(data.task);
-        // Sync parent list status to SHORTLISTED
-        await onStatusChange(candidate.id, 'SHORTLISTED');
+        // Sync parent list status to TASK_ASSIGNED
+        await onStatusChange(candidate.id, 'TASK_ASSIGNED');
         setTaskTitle('');
         setTaskInstructions('');
       }
@@ -206,12 +270,14 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
     if (!task || reviewingTask) return;
     setReviewingTask(status);
     try {
+      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
       const response = await fetch('/api/tasks/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           taskId: task.id,
           status,
+          isDemo,
         }),
       });
 
@@ -219,6 +285,9 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
       const data = await response.json();
       if (data.success) {
         setTask(data.task);
+        if (status === 'REJECTED') {
+          await onStatusChange(candidate.id, 'REJECTED');
+        }
       }
     } catch (e) {
       console.error('Failed to review task:', e);
@@ -234,6 +303,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
 
     setSendingMsg(true);
     try {
+      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -241,13 +311,13 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
           candidateId: candidate.id,
           content: newMessage,
           senderType: 'ADMIN',
+          isDemo,
         }),
       });
 
       if (!response.ok) throw new Error();
       const data = await response.json();
       if (data.success) {
-        setMessages(prev => [...prev, data.message]);
         setNewMessage('');
       }
     } catch (err) {
@@ -259,23 +329,17 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
 
   const statusColors = {
     PENDING: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
-    REVIEWED: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-    SHORTLISTED: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20',
+    SHORTLISTED: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+    TASK_ASSIGNED: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
+    SUBMITTED: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
     REJECTED: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
   }[candidate.status];
-
-  // Map enum back to human readable position string
-  const formatPosition = (pos: string) => {
-    return pos.split('_').map(word => 
-      word.charAt(0) + word.slice(1).toLowerCase()
-    ).join(' ').replace('Ui Ux', 'UI/UX');
-  };
 
   return (
     <>
       {/* Backdrop Overlay */}
       <div 
-        className={`fixed inset-0 z-40 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ${
+        className={`fixed inset-0 z-45 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ${
           isOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
         }`}
         onClick={onClose}
@@ -295,7 +359,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
                 {candidate.status}
               </span>
               <h3 className="text-lg font-bold text-slate-100">{candidate.fullName}</h3>
-              <p className="text-xs text-indigo-400 font-medium">{formatPosition(candidate.position)}</p>
+              <p className="text-xs text-indigo-400 font-medium">{candidate.position}</p>
             </div>
             <button 
               onClick={onClose}
@@ -395,23 +459,29 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <a 
-                      href={candidate.resumeUrl} 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-semibold transition-all cursor-pointer"
-                    >
-                      <Eye className="w-3 h-3" /> View
-                    </a>
-                    <a 
-                      href={candidate.resumeUrl} 
-                      download
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="p-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                    </a>
+                    {signedResumeUrl ? (
+                      <>
+                        <a 
+                          href={signedResumeUrl} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-semibold transition-all cursor-pointer"
+                        >
+                          <Eye className="w-3 h-3" /> View
+                        </a>
+                        <a 
+                          href={signedResumeUrl} 
+                          download
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1.5 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-colors"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </a>
+                      </>
+                    ) : (
+                      <span className="text-[10px] text-slate-500">Loading Resume URL...</span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -419,7 +489,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
               {/* Cover Letter */}
               <div className="space-y-2">
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Cover Letter / Bio</h4>
-                <div className="p-4 rounded-xl border border-slate-850 bg-slate-950/40 text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-60 overflow-y-auto">
+                <div className="p-4 rounded-xl border border-slate-855 bg-slate-955/40 text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-60 overflow-y-auto">
                   {candidate.coverLetter || 'No cover letter provided.'}
                 </div>
               </div>
@@ -429,12 +499,12 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">General Candidate Status</h4>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => handleCandidateUpdate('REVIEWED')}
-                    disabled={candidate.status === 'REVIEWED' || !!updatingCandidate}
+                    onClick={() => handleCandidateUpdate('SHORTLISTED')}
+                    disabled={candidate.status === 'SHORTLISTED' || !!updatingCandidate}
                     className="flex items-center gap-1 px-3 py-2 rounded-xl border border-slate-800 hover:border-slate-700 text-[10px] font-semibold text-slate-300 hover:text-white cursor-pointer disabled:opacity-40"
                   >
-                    {updatingCandidate === 'REVIEWED' && <Loader2 className="w-3 h-3 animate-spin" />}
-                    Mark Reviewed
+                    {updatingCandidate === 'SHORTLISTED' && <Loader2 className="w-3 h-3 animate-spin" />}
+                    Shortlist Candidate
                   </button>
                   <button
                     onClick={() => handleCandidateUpdate('REJECTED')}
@@ -479,7 +549,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
                       value={taskTitle}
                       onChange={(e) => setTaskTitle(e.target.value)}
                       required
-                      className="w-full px-3 py-2.5 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs"
+                      className="w-full px-3 py-2.5 rounded-xl border border-slate-800 bg-slate-955/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs"
                     />
                   </div>
 
@@ -495,7 +565,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
                       value={taskInstructions}
                       onChange={(e) => setTaskInstructions(e.target.value)}
                       required
-                      className="w-full px-3 py-2.5 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs resize-none"
+                      className="w-full px-3 py-2.5 rounded-xl border border-slate-800 bg-slate-955/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs resize-none"
                     />
                   </div>
 
@@ -520,7 +590,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
               ) : (
                 // 2. Active Task Status View
                 <div className="space-y-5">
-                  <div className="flex items-center justify-between p-4 rounded-xl border border-slate-850 bg-slate-950/20">
+                  <div className="flex items-center justify-between p-4 rounded-xl border border-slate-855 bg-slate-955/20">
                     <div>
                       <p className="text-[10px] text-slate-500 font-bold uppercase">Assignment Status</p>
                       <h4 className="text-sm font-bold text-slate-200 mt-1">{task.title}</h4>
@@ -556,10 +626,10 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
 
                   {/* Submission details block */}
                   {task.status !== 'ASSIGNED' && task.submissionUrl && (
-                    <div className="bg-slate-950/40 border border-slate-850 rounded-xl p-4 space-y-4">
+                    <div className="bg-slate-955/40 border border-slate-855 rounded-xl p-4 space-y-4">
                       <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Candidate Submission</h4>
                       
-                      <div className="flex items-center justify-between p-3 rounded-lg border border-slate-900 bg-slate-950/20">
+                      <div className="flex items-center justify-between p-3 rounded-lg border border-slate-900 bg-slate-955/20">
                         <div className="flex items-center gap-2 truncate">
                           <FileText className="w-4 h-4 text-indigo-400 flex-shrink-0" />
                           <p className="text-xs text-slate-300 truncate" title={task.submissionUrl}>{task.submissionUrl}</p>
@@ -577,7 +647,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
                       {task.submissionNotes && (
                         <div className="space-y-1">
                           <p className="text-[10px] text-slate-500 font-bold uppercase leading-none">Notes</p>
-                          <p className="text-xs text-slate-300 leading-normal p-3 rounded border border-slate-900 bg-slate-950/10 whitespace-pre-wrap">
+                          <p className="text-xs text-slate-300 leading-normal p-3 rounded border border-slate-900 bg-slate-955/10 whitespace-pre-wrap">
                             {task.submissionNotes}
                           </p>
                         </div>
@@ -610,7 +680,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
                   {/* Original Challenge instructions */}
                   <div className="space-y-1.5">
                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Instructions Assigned</p>
-                    <div className="p-4 rounded-xl border border-slate-850 bg-slate-950/20 text-xs text-slate-400 leading-relaxed whitespace-pre-wrap max-h-52 overflow-y-auto">
+                    <div className="p-4 rounded-xl border border-slate-855 bg-slate-955/20 text-xs text-slate-400 leading-relaxed whitespace-pre-wrap max-h-52 overflow-y-auto">
                       {task.instructions}
                     </div>
                   </div>
@@ -621,9 +691,9 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
 
           {/* TAB 3: HR Recruiter Chat Feed */}
           {activeTab === 'chat' && (
-            <div className="flex flex-col h-[400px] border border-slate-800 bg-slate-950/20 rounded-xl overflow-hidden relative">
+            <div className="flex flex-col h-[400px] border border-slate-800 bg-slate-955/20 rounded-xl overflow-hidden relative">
               {/* Messages feed */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-slate-950/5">
+              <div className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-slate-955/5">
                 {messages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center p-4">
                     <MessageSquare className="w-8 h-8 text-slate-700 mb-2" />
@@ -634,17 +704,17 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
                   </div>
                 ) : (
                   messages.map((msg) => {
-                    const isAdmin = msg.senderType === 'ADMIN';
+                    const isAdminMsg = msg.senderType === 'ADMIN';
                     return (
                       <div 
                         key={msg.id}
-                        className={`flex flex-col max-w-[80%] ${isAdmin ? 'ml-auto items-end' : 'mr-auto items-start'}`}
+                        className={`flex flex-col max-w-[80%] ${isAdminMsg ? 'ml-auto items-end' : 'mr-auto items-start'}`}
                       >
                         <div 
                           className={`p-2.5 rounded-xl text-xs leading-relaxed
-                            ${isAdmin 
+                            ${isAdminMsg 
                               ? 'bg-indigo-600 text-white rounded-tr-none' 
-                              : 'bg-slate-900 border border-slate-850 text-slate-200 rounded-tl-none'
+                              : 'bg-slate-900 border border-slate-855 text-slate-200 rounded-tl-none'
                             }`}
                         >
                           {msg.content}
@@ -660,13 +730,13 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
               </div>
 
               {/* Chat Input form */}
-              <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-850 bg-slate-950/40 flex gap-2 flex-shrink-0">
+              <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-855 bg-slate-955/40 flex gap-2 flex-shrink-0">
                 <input
                   type="text"
                   placeholder="Type message here..."
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
-                  className="flex-1 px-3 py-2 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs"
+                  className="flex-1 px-3 py-2 rounded-xl border border-slate-800 bg-slate-955/60 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs"
                 />
                 <button
                   type="submit"

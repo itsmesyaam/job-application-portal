@@ -1,8 +1,13 @@
 import { NextResponse } from 'next/server';
-import { TaskStatus, ApplicationStatus } from '@prisma/client';
-
-import { prisma } from '@/lib/prisma';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { sendTaskReminderEmail } from '@/lib/email';
+
+function getAdminClient() {
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+    process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  );
+}
 
 export async function GET(request: Request) {
   try {
@@ -14,30 +19,35 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Unauthorized Access. Invalid Cron Secret token.' }, { status: 401 });
     }
 
+    const supabase = getAdminClient();
     const now = new Date();
 
     // 2. Action A: Expire all ASSIGNED tasks past their deadline
-    const overdueTasks = await prisma.task.findMany({
-      where: {
-        status: TaskStatus.ASSIGNED,
-        deadline: { lt: now },
-      },
-      include: { candidate: true },
-    });
+    const { data: overdueTasks, error: fetchError } = await supabase
+      .from('tasks')
+      .select('*, candidates(*)')
+      .eq('status', 'ASSIGNED')
+      .lt('deadline', now.toISOString());
 
-    const overdueUpdates = overdueTasks.map(async (task) => {
-      // Execute atomically in transaction: set task to OVERDUE and reject candidate status
-      await prisma.$transaction([
-        prisma.task.update({
-          where: { id: task.id },
-          data: { status: TaskStatus.OVERDUE },
-        }),
-        prisma.candidate.update({
-          where: { id: task.candidateId },
-          data: { status: ApplicationStatus.REJECTED },
-        })
-      ]);
-      console.log(`[Cron Task Overdue] Task ID: ${task.id} for Candidate: ${task.candidate.fullName} has expired. Candidate rejected.`);
+    if (fetchError) throw fetchError;
+
+    const overdueUpdates = (overdueTasks || []).map(async (task: any) => {
+      const candidate = task.candidates;
+      const candidateName = candidate ? candidate.full_name : 'Unknown';
+
+      // Set task to OVERDUE
+      await supabase
+        .from('tasks')
+        .update({ status: 'OVERDUE' })
+        .eq('id', task.id);
+
+      // Set candidate status to REJECTED
+      await supabase
+        .from('candidates')
+        .update({ status: 'REJECTED' })
+        .eq('id', task.candidate_id);
+
+      console.log(`[Cron Task Overdue] Task ID: ${task.id} for Candidate: ${candidateName} has expired. Candidate rejected.`);
     });
     await Promise.all(overdueUpdates);
 
@@ -45,35 +55,36 @@ export async function GET(request: Request) {
     const elevenHoursLater = new Date(now.getTime() + 11 * 60 * 60 * 1000);
     const twelveHoursLater = new Date(now.getTime() + 12 * 60 * 60 * 1000);
 
-    const reminderTasks = await prisma.task.findMany({
-      where: {
-        status: TaskStatus.ASSIGNED,
-        reminderSent: false,
-        deadline: {
-          gte: elevenHoursLater,
-          lte: twelveHoursLater,
-        },
-      },
-      include: { candidate: true },
-    });
+    const { data: reminderTasks, error: fetchRemError } = await supabase
+      .from('tasks')
+      .select('*, candidates(*)')
+      .eq('status', 'ASSIGNED')
+      .eq('reminder_sent', false)
+      .gte('deadline', elevenHoursLater.toISOString())
+      .lte('deadline', twelveHoursLater.toISOString());
 
-    const reminderUpdates = reminderTasks.map(async (task) => {
+    if (fetchRemError) throw fetchRemError;
+
+    const reminderUpdates = (reminderTasks || []).map(async (task: any) => {
+      const candidate = task.candidates;
+      if (!candidate) return;
+
       try {
         await sendTaskReminderEmail(
-          task.candidate.email,
-          task.candidate.fullName,
+          candidate.email,
+          candidate.full_name,
           task.title,
           task.deadline
         );
         
-        await prisma.task.update({
-          where: { id: task.id },
-          data: { reminderSent: true },
-        });
+        await supabase
+          .from('tasks')
+          .update({ reminder_sent: true })
+          .eq('id', task.id);
         
-        console.log(`[Cron Reminder Sent] Warning dispatched to Candidate: ${task.candidate.fullName}`);
+        console.log(`[Cron Reminder Sent] Warning dispatched to Candidate: ${candidate.full_name}`);
       } catch (err) {
-        console.error(`[Cron Reminder Error] Failed warning dispatch to candidate ${task.candidate.email}:`, err);
+        console.error(`[Cron Reminder Error] Failed warning dispatch to candidate ${candidate.email}:`, err);
       }
     });
     await Promise.all(reminderUpdates);
@@ -81,12 +92,13 @@ export async function GET(request: Request) {
     return NextResponse.json({
       success: true,
       timestamp: now.toISOString(),
-      overdueProcessed: overdueTasks.length,
-      remindersSent: reminderTasks.length,
+      overdueProcessed: overdueTasks?.length || 0,
+      remindersSent: reminderTasks?.length || 0,
     });
   } catch (error) {
     console.error('Error running check-deadlines cron job:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
 }
+
 export const dynamic = 'force-dynamic';

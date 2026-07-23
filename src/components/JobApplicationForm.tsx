@@ -2,14 +2,14 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useSession, signIn, signOut } from 'next-auth/react';
 import { useForm, FormProvider } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { 
-  User, Mail, Phone, Link2, Briefcase, GraduationCap, 
+  User as UserIcon, Mail, Phone, Link2, Briefcase, GraduationCap, 
   ArrowRight, ArrowLeft, Check, Sparkles, LogOut, Loader2 
 } from 'lucide-react';
 
+import { createClient } from '@/lib/supabase/client';
 import { jobApplicationSchema } from '@/schemas/application';
 import { ResumeUpload } from './ResumeUpload';
 import { Toast, type ToastType } from './Toast';
@@ -20,7 +20,7 @@ interface JobApplicationFormValues {
   phoneNumber: string;
   portfolioUrl?: string;
   resume: FileList | File | string | null;
-  position: 'UI/UX Designer' | 'Full Stack Developer' | 'Mobile Developer' | 'Software Tester / QA' | 'HR Manager' | 'Digital Marketer' | 'Intern' | '';
+  position: 'UI/UX Designer' | 'Full Stack Developer' | 'Mobile Developer' | 'Tester' | 'HR' | 'Digital Marketer' | 'Intern' | '';
   yearsOfExperience: number | '';
   coverLetter: string;
 }
@@ -33,11 +33,13 @@ const steps = [
 ];
 
 export function JobApplicationForm() {
-  const { data: session } = useSession();
-  const [currentStep, setCurrentStep] = useState(1);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [supabase] = useState(() => createClient());
+  const [user, setUser] = useState<any>(null);
   const [isDemoUser, setIsDemoUser] = useState(false);
   const [demoProfile, setDemoProfile] = useState<{ name: string; email: string } | null>(null);
+  
+  const [currentStep, setCurrentStep] = useState(1);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Toast Notification State
   const [toast, setToast] = useState<{ message: string; type: ToastType; isVisible: boolean }>({
@@ -71,32 +73,56 @@ export function JobApplicationForm() {
 
   const { register, handleSubmit, setValue, trigger, formState: { errors }, reset } = methods;
 
+  // Listen to Supabase auth state change
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUser(session.user);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, [supabase]);
+
   // Auto-fill form fields when Google authentication succeeds
   useEffect(() => {
-    if (session?.user) {
-      if (session.user.name) {
-        setValue('fullName', session.user.name, { shouldValidate: true });
-      }
-      if (session.user.email) {
-        setValue('email', session.user.email, { shouldValidate: true });
-      }
-      
-      const userName = session.user.name || 'User';
+    if (user) {
+      const name = user.user_metadata?.full_name || user.email?.split('@')[0] || '';
+      const email = user.email || '';
 
-      // Defer state updates to the next event loop tick to prevent cascading render warnings
+      setValue('fullName', name, { shouldValidate: true });
+      setValue('email', email, { shouldValidate: true });
+
       const timer = setTimeout(() => {
         if (isDemoUser) {
           setIsDemoUser(false);
         }
         if (currentStep === 1) {
           setCurrentStep(2);
-          showToast(`Welcome, ${userName}! Verified details auto-filled.`, 'success');
+          showToast(`Welcome, ${name}! Verified details auto-filled.`, 'success');
         }
       }, 0);
 
       return () => clearTimeout(timer);
     }
-  }, [session, setValue, currentStep, isDemoUser]);
+  }, [user, setValue, currentStep, isDemoUser]);
+
+  // Google Login Handler
+  const handleGoogleLogin = async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${window.location.origin}/`,
+      },
+    });
+    if (error) {
+      showToast(error.message, 'error');
+    }
+  };
 
   // Demo Login Handler for testing without actual OAuth configuration
   const handleDemoLogin = () => {
@@ -112,31 +138,36 @@ export function JobApplicationForm() {
     showToast('Signed in with simulated developer credentials.', 'info');
   };
 
-  const handleDemoLogout = () => {
-    setIsDemoUser(false);
-    setDemoProfile(null);
+  const handleLogout = async () => {
+    if (isDemoUser) {
+      setIsDemoUser(false);
+      setDemoProfile(null);
+    } else {
+      await supabase.auth.signOut();
+      setUser(null);
+    }
     reset({
       fullName: '',
       email: '',
       phoneNumber: '',
       portfolioUrl: '',
       resume: null,
-      position: undefined,
-      yearsOfExperience: undefined,
+      position: '',
+      yearsOfExperience: '',
       coverLetter: '',
     });
     setCurrentStep(1);
-    showToast('Signed out of demo session.', 'info');
+    showToast('Signed out successfully.', 'info');
   };
 
-  const isUserAuthenticated = !!session || isDemoUser;
-  const activeUser = session?.user 
-    ? { name: session.user.name, email: session.user.email, image: session.user.image } 
+  const isUserAuthenticated = !!user || isDemoUser;
+  const activeUser = user 
+    ? { name: user.user_metadata?.full_name || user.email?.split('@')[0], email: user.email, image: user.user_metadata?.avatar_url } 
     : demoProfile 
       ? { name: demoProfile.name, email: demoProfile.email, image: null } 
       : null;
 
-  const isAdmin = !!session?.user?.isAdmin || (isDemoUser && demoProfile?.email === 'jane.doe@example.com');
+  const isAdmin = activeUser?.email === 'admin@yourdomain.com' || activeUser?.email === 'jane.doe@example.com';
 
   // Move to next step with validation check
   const nextStep = async () => {
@@ -181,6 +212,7 @@ export function JobApplicationForm() {
       formData.append('position', data.position);
       formData.append('yearsOfExperience', String(data.yearsOfExperience));
       formData.append('coverLetter', data.coverLetter);
+      
       if (isDemoUser) {
         formData.append('isDemo', 'true');
       }
@@ -206,12 +238,7 @@ export function JobApplicationForm() {
         // Reset form and go back to step 1 (or show success screen)
         setTimeout(() => {
           reset();
-          if (isDemoUser) {
-            handleDemoLogout();
-          } else {
-            signOut({ redirect: false });
-          }
-          setCurrentStep(1);
+          handleLogout();
         }, 3000);
       } else {
         const errorMsg = result.error || 'Submission failed. Please check form details.';
@@ -296,7 +323,7 @@ export function JobApplicationForm() {
                     {/* Google Login Button */}
                     <button
                       type="button"
-                      onClick={() => signIn('google')}
+                      onClick={handleGoogleLogin}
                       className="flex items-center justify-center gap-3 w-full bg-white text-slate-900 hover:bg-slate-100 transition-all font-medium py-3 px-4 rounded-xl shadow-md cursor-pointer text-sm"
                     >
                       {/* SVG Google Logo */}
@@ -358,7 +385,7 @@ export function JobApplicationForm() {
                       
                       <button
                         type="button"
-                        onClick={isDemoUser ? handleDemoLogout : () => signOut()}
+                        onClick={handleLogout}
                         className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-rose-400 transition-colors"
                         title="Sign Out"
                       >
@@ -383,7 +410,7 @@ export function JobApplicationForm() {
                       {isAdmin && (
                         <div className="flex justify-center pt-1 border-t border-slate-800/40">
                           <Link 
-                            href="/admin/dashboard" 
+                            href="/admin" 
                             className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 text-indigo-400 text-xs font-semibold transition-all"
                           >
                             <Sparkles className="w-3.5 h-3.5 text-indigo-400" /> Go to Admin Dashboard
@@ -412,7 +439,7 @@ export function JobApplicationForm() {
                     </label>
                     <div className="relative">
                       <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
-                        <User className="w-4 h-4" />
+                        <UserIcon className="w-4 h-4" />
                       </span>
                       <input
                         type="text"
@@ -449,7 +476,7 @@ export function JobApplicationForm() {
                       />
                     </div>
                     <span className="block text-[10px] text-slate-500 font-medium mt-1">
-                      Email is tied to Google Auth and cannot be modified.
+                      Email is tied to Auth and cannot be modified.
                     </span>
                   </div>
 
@@ -536,8 +563,8 @@ export function JobApplicationForm() {
                       <option value="UI/UX Designer" className="bg-slate-950 text-slate-200">UI/UX Designer</option>
                       <option value="Full Stack Developer" className="bg-slate-950 text-slate-200">Full Stack Developer</option>
                       <option value="Mobile Developer" className="bg-slate-950 text-slate-200">Mobile Developer</option>
-                      <option value="Software Tester / QA" className="bg-slate-950 text-slate-200">Software Tester / QA</option>
-                      <option value="HR Manager" className="bg-slate-950 text-slate-200">HR Manager</option>
+                      <option value="Tester" className="bg-slate-950 text-slate-200">Tester</option>
+                      <option value="HR" className="bg-slate-950 text-slate-200">HR</option>
                       <option value="Digital Marketer" className="bg-slate-950 text-slate-200">Digital Marketer</option>
                       <option value="Intern" className="bg-slate-950 text-slate-200">Intern</option>
                     </select>

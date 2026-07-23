@@ -1,19 +1,20 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { signOut } from 'next-auth/react';
+import React, { useState, useEffect, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { 
   Send, FileText, Link2, LogOut, CheckCircle2, 
   XCircle, AlertCircle, Clock, Check, Sparkles, Upload, Loader2,
   Mail
 } from 'lucide-react';
+
+import { createClient } from '@/lib/supabase/client';
 import { Toast, type ToastType } from './Toast';
 
 interface SerializedTask {
   id: string;
   title: string;
   instructions: string;
-  taskFileUrl?: string;
   assignedAt: string;
   deadline: string;
   submissionUrl?: string;
@@ -24,7 +25,6 @@ interface SerializedTask {
 
 interface SerializedCandidate {
   id: string;
-  googleId: string;
   fullName: string;
   email: string;
   phone: string;
@@ -33,7 +33,7 @@ interface SerializedCandidate {
   position: string;
   yearsOfExperience: number;
   coverLetter?: string;
-  status: 'PENDING' | 'REVIEWED' | 'SHORTLISTED' | 'REJECTED';
+  status: 'PENDING' | 'SHORTLISTED' | 'TASK_ASSIGNED' | 'SUBMITTED' | 'REJECTED';
   createdAt: string;
   task: SerializedTask | null;
 }
@@ -51,6 +51,8 @@ interface CandidateDashboardClientProps {
 }
 
 export function CandidateDashboardClient({ initialCandidate }: CandidateDashboardClientProps) {
+  const router = useRouter();
+  const [supabase] = useState(() => createClient());
   const [candidate] = useState<SerializedCandidate>(initialCandidate);
   const [task, setTask] = useState<SerializedTask | null>(initialCandidate.task);
   
@@ -85,31 +87,70 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
     setToast((prev) => ({ ...prev, isVisible: false }));
   };
 
-  // 1. Fetch Chat Feed
-  const fetchMessages = useCallback(async () => {
-    try {
-      const response = await fetch(`/api/chat?candidateId=${candidate.id}`);
-      if (!response.ok) throw new Error();
-      const data = await response.json();
-      if (data.success) {
-        setMessages(data.messages);
-      }
-    } catch (e) {
-      console.error('Error syncing chat feed:', e);
-    }
-  }, [candidate.id]);
-
-  // Chat Polling Trigger
+  // 1. Fetch initial message history and subscribe to Realtime chat channel
   useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchMessages();
-    }, 0);
-    const interval = setInterval(fetchMessages, 4000); // Poll chat messages every 4 seconds
-    return () => {
-      clearTimeout(timer);
-      clearInterval(interval);
+    const loadMessages = async () => {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('candidate_id', candidate.id)
+        .order('created_at', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching chat history:', error);
+        return;
+      }
+
+      if (data) {
+        setMessages(
+          data.map((m: any) => ({
+            id: m.id,
+            content: m.content,
+            senderType: m.sender_type,
+            createdAt: m.created_at,
+            isRead: m.is_read,
+          }))
+        );
+      }
     };
-  }, [fetchMessages]);
+
+    loadMessages();
+
+    // Setup Supabase Realtime channel subscription
+    const channel = supabase
+      .channel(`chat_channel:${candidate.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `candidate_id=eq.${candidate.id}`,
+        },
+        (payload) => {
+          const newMsg = payload.new as any;
+          setMessages((prev) => {
+            // Prevent duplicate message additions
+            if (prev.some((m) => m.id === newMsg.id)) return prev;
+            return [
+              ...prev,
+              {
+                id: newMsg.id,
+                content: newMsg.content,
+                senderType: newMsg.sender_type,
+                createdAt: newMsg.created_at,
+                isRead: newMsg.is_read,
+              },
+            ];
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [supabase, candidate.id]);
 
   // Auto-scroll chat to bottom
   useEffect(() => {
@@ -129,24 +170,21 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
       if (difference <= 0) {
         setTimeLeft('EXPIRED');
         setIsUrgent(false);
-        // Update task status locally and refresh
-        setTask(t => t ? { ...t, status: 'OVERDUE' } : null);
+        setTask((t) => (t ? { ...t, status: 'OVERDUE' } : null));
         showToast('Assignment deadline has passed. Submissions locked.', 'error');
         return;
       }
 
-      // Calculate time components
       const hours = Math.floor(difference / (1000 * 60 * 60));
       const minutes = Math.floor((difference % (1000 * 60 * 60)) / (1000 * 60));
       const seconds = Math.floor((difference % (1000 * 60)) / 1000);
 
-      // Pad with leading zeros
       const formattedHours = String(hours).padStart(2, '0');
       const formattedMinutes = String(minutes).padStart(2, '0');
       const formattedSeconds = String(seconds).padStart(2, '0');
 
       setTimeLeft(`${formattedHours}:${formattedMinutes}:${formattedSeconds}`);
-      setIsUrgent(hours < 2); // Red alert if under 2 hours
+      setIsUrgent(hours < 2);
     };
 
     updateTimer();
@@ -161,6 +199,8 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
 
     setSendingMsg(true);
     try {
+      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
+      
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -168,6 +208,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
           candidateId: candidate.id,
           content: newMessage,
           senderType: 'CANDIDATE',
+          isDemo,
         }),
       });
 
@@ -175,7 +216,6 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
       const data = await response.json();
       
       if (data.success) {
-        setMessages(prev => [...prev, data.message]);
         setNewMessage('');
       }
     } catch {
@@ -197,9 +237,13 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
 
     setSubmittingTask(true);
     try {
+      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
       const formData = new FormData();
       formData.append('candidateId', candidate.id);
       formData.append('submissionNotes', submitNotes);
+      if (isDemo) {
+        formData.append('isDemo', 'true');
+      }
       
       if (submitFile) {
         formData.append('file', submitFile);
@@ -227,11 +271,17 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
     }
   };
 
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    router.push('/');
+  };
+
   const statusColors = {
     PENDING: { bg: 'bg-amber-500/10 border-amber-500/20 text-amber-400', desc: 'Your application has been received and is currently under review by our hiring managers.' },
-    REVIEWED: { bg: 'bg-blue-500/10 border-blue-500/20 text-blue-400', desc: 'Our team has reviewed your application details. We will notify you of any assessment assignments.' },
-    SHORTLISTED: { bg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400', desc: 'Congratulations! You have been shortlisted. Please complete your assigned take-home challenge below.' },
-    REJECTED: { bg: 'bg-rose-500/10 border-rose-500/20 text-rose-400', desc: 'Thank you for your interest in joining us. Our team decided not to move forward with your application at this time.' },
+    SHORTLISTED: { bg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400', desc: 'Congratulations! You have been shortlisted. We are reviewing details to assign you a take-home task.' },
+    TASK_ASSIGNED: { bg: 'bg-violet-500/10 border-violet-500/20 text-violet-400', desc: 'You have a pending technical assignment task. Please complete it within the 48-hour window.' },
+    SUBMITTED: { bg: 'bg-blue-500/10 border-blue-500/20 text-blue-400', desc: 'Your take-home assignment has been submitted successfully and is currently under review.' },
+    REJECTED: { bg: 'bg-rose-500/10 border-rose-500/20 text-rose-400', desc: 'Thank you for your interest in joining us. Our team decided not to move forward with your application.' },
   }[candidate.status];
 
   return (
@@ -257,7 +307,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
           
           <div className="flex items-center gap-4">
             <button
-              onClick={() => signOut({ callbackUrl: '/' })}
+              onClick={handleSignOut}
               className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg border border-slate-800 bg-slate-900/10 text-xs font-semibold text-slate-400 hover:text-slate-200 hover:border-slate-700 transition-all cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" /> Sign Out
@@ -296,8 +346,8 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
             </div>
           </div>
 
-          {/* Shortlisted Take-home Task Section */}
-          {candidate.status === 'SHORTLISTED' && task && (
+          {/* Task Module when status is TASK_ASSIGNED or SUBMITTED */}
+          {(candidate.status === 'TASK_ASSIGNED' || candidate.status === 'SUBMITTED' || candidate.status === 'REJECTED') && task && (
             <div className="border border-slate-800 bg-slate-900/40 backdrop-blur-xl rounded-2xl overflow-hidden shadow-xl">
               <div className="p-6 border-b border-slate-800 bg-slate-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="space-y-1">
@@ -508,7 +558,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
                       <div className="p-4 rounded-xl border border-rose-500/20 bg-rose-500/5 text-rose-400 text-xs leading-normal flex gap-2">
                         <XCircle className="w-5 h-5 flex-shrink-0" />
                         <span>
-                          <strong>Assignment Review Completed.</strong> While we appreciate the effort you put into the take-home challenge, our coordinators decided not to move forward with your application. We will retain your profile in our candidate pool for future roles.
+                          <strong>Assignment Review Completed.</strong> While we appreciate the effort you put into the take-home challenge, our coordinators decided not to move forward with your application.
                         </span>
                       </div>
                     )}
@@ -545,15 +595,15 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
               </div>
             ) : (
               messages.map((msg) => {
-                const isAdmin = msg.senderType === 'ADMIN';
+                const isAdminMsg = msg.senderType === 'ADMIN';
                 return (
                   <div 
                     key={msg.id}
-                    className={`flex flex-col max-w-[80%] ${isAdmin ? 'mr-auto items-start' : 'ml-auto items-end'}`}
+                    className={`flex flex-col max-w-[80%] ${isAdminMsg ? 'mr-auto items-start' : 'ml-auto items-end'}`}
                   >
                     <div 
                       className={`p-3 rounded-2xl text-xs leading-relaxed
-                        ${isAdmin 
+                        ${isAdminMsg 
                           ? 'bg-slate-900 border border-slate-850 text-slate-200 rounded-tl-none' 
                           : 'bg-indigo-600 text-white rounded-tr-none shadow-[0_0_10px_rgba(99,102,241,0.1)]'
                         }`}

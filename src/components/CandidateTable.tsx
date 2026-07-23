@@ -10,30 +10,30 @@ import { Toast, type ToastType } from './Toast';
 
 export interface Candidate {
   id: string;
-  googleId: string;
   fullName: string;
   email: string;
   phone: string;
   portfolioUrl?: string;
   resumeUrl: string;
-  position: 'UI_UX_DESIGNER' | 'FULL_STACK_DEVELOPER' | 'MOBILE_DEVELOPER' | 'TESTER' | 'HR' | 'DIGITAL_MARKETER' | 'INTERN';
+  position: 'UI/UX Designer' | 'Full Stack Developer' | 'Mobile Developer' | 'Tester' | 'HR' | 'Digital Marketer' | 'Intern';
   yearsOfExperience: number;
   coverLetter?: string;
-  status: 'PENDING' | 'REVIEWED' | 'SHORTLISTED' | 'REJECTED';
+  status: 'PENDING' | 'SHORTLISTED' | 'TASK_ASSIGNED' | 'SUBMITTED' | 'REJECTED';
   createdAt: string;
 }
 
 interface StatsSummary {
   total: number;
   pending: number;
-  reviewed: number;
   shortlisted: number;
+  taskAssigned: number;
+  submitted: number;
   rejected: number;
 }
 
 export function CandidateTable() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [stats, setStats] = useState<StatsSummary>({ total: 0, pending: 0, reviewed: 0, shortlisted: 0, rejected: 0 });
+  const [stats, setStats] = useState<StatsSummary>({ total: 0, pending: 0, shortlisted: 0, taskAssigned: 0, submitted: 0, rejected: 0 });
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -113,14 +113,12 @@ export function CandidateTable() {
       
       if (data.success) {
         showToast(`Candidate status updated to ${newStatus}.`, 'success');
-        // Update local candidate list and selected candidate details
         setCandidates(prev => 
           prev.map(c => c.id === id ? { ...c, status: newStatus as Candidate['status'] } : c)
         );
         if (selectedCandidate && selectedCandidate.id === id) {
           setSelectedCandidate(prev => prev ? { ...prev, status: newStatus as Candidate['status'] } : null);
         }
-        // Refresh aggregate stats count
         fetchData();
       }
     } catch (error) {
@@ -129,16 +127,11 @@ export function CandidateTable() {
     }
   };
 
-  const formatPosition = (pos: string) => {
-    return pos.split('_').map(word => 
-      word.charAt(0) + word.slice(1).toLowerCase()
-    ).join(' ').replace('Ui Ux', 'UI/UX');
-  };
-
   const statusBadges = {
     PENDING: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
-    REVIEWED: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
     SHORTLISTED: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+    TASK_ASSIGNED: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
+    SUBMITTED: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
     REJECTED: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
   };
 
@@ -173,7 +166,7 @@ export function CandidateTable() {
           </div>
         </div>
 
-        {/* Shortlisted */}
+        {/* Shortlisted / Assigned */}
         <div className="border border-slate-800 bg-slate-900/30 backdrop-blur-xl p-5 rounded-2xl relative overflow-hidden">
           <div className="absolute top-4 right-4 text-emerald-400/20">
             <CheckCircle2 className="w-8 h-8" />
@@ -235,13 +228,13 @@ export function CandidateTable() {
                 className="w-full sm:w-44 pl-9 pr-8 py-2.5 rounded-xl border border-slate-800 bg-slate-950/60 text-slate-300 focus:outline-none focus:border-indigo-500 transition-all text-xs appearance-none cursor-pointer"
               >
                 <option value="">All Positions</option>
-                <option value="UI_UX_DESIGNER">UI/UX Designer</option>
-                <option value="FULL_STACK_DEVELOPER">Full Stack Developer</option>
-                <option value="MOBILE_DEVELOPER">Mobile Developer</option>
-                <option value="TESTER">Software Tester / QA</option>
-                <option value="HR">HR Manager</option>
-                <option value="DIGITAL_MARKETER">Digital Marketer</option>
-                <option value="INTERN">Intern</option>
+                <option value="UI/UX Designer">UI/UX Designer</option>
+                <option value="Full Stack Developer">Full Stack Developer</option>
+                <option value="Mobile Developer">Mobile Developer</option>
+                <option value="Tester">Tester</option>
+                <option value="HR">HR</option>
+                <option value="Digital Marketer">Digital Marketer</option>
+                <option value="Intern">Intern</option>
               </select>
               <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-slate-500">
                 <Filter className="w-3 h-3" />
@@ -260,8 +253,9 @@ export function CandidateTable() {
               >
                 <option value="">All Statuses</option>
                 <option value="PENDING">Pending</option>
-                <option value="REVIEWED">Reviewed</option>
                 <option value="SHORTLISTED">Shortlisted</option>
+                <option value="TASK_ASSIGNED">Task Assigned</option>
+                <option value="SUBMITTED">Submitted</option>
                 <option value="REJECTED">Rejected</option>
               </select>
               <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-slate-500">
@@ -288,7 +282,6 @@ export function CandidateTable() {
             </thead>
             <tbody className="divide-y divide-slate-850 text-slate-300 text-xs">
               {loading ? (
-                // Skeletons Table Loading State
                 Array.from({ length: 5 }).map((_, idx) => (
                   <tr key={idx} className="animate-pulse">
                     <td className="p-4 pl-6">
@@ -329,7 +322,7 @@ export function CandidateTable() {
                       <p className="font-semibold text-slate-200 group-hover:text-indigo-400 transition-colors">{candidate.fullName}</p>
                       <p className="text-[10px] text-slate-500 mt-0.5">{candidate.email}</p>
                     </td>
-                    <td className="p-4 font-medium">{formatPosition(candidate.position)}</td>
+                    <td className="p-4 font-medium">{candidate.position}</td>
                     <td className="p-4">{candidate.yearsOfExperience} {candidate.yearsOfExperience === 1 ? 'year' : 'years'}</td>
                     <td className="p-4 text-slate-400">
                       {new Date(candidate.createdAt).toLocaleDateString(undefined, { 

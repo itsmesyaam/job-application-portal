@@ -1,15 +1,15 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { Position, ApplicationStatus, Prisma } from '@prisma/client';
+import { createClient } from '@/lib/supabase/server';
 
-import { authOptions } from '../../auth/[...nextauth]/route';
-import { prisma } from '@/lib/prisma';
+const ADMIN_LIST = (process.env.ADMIN_EMAILS || 'admin@yourdomain.com,jane.doe@example.com').split(',');
 
 export async function GET(request: Request) {
   try {
-    // 1. Authorize Admin Session
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.isAdmin) {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    const isAdmin = user ? ADMIN_LIST.includes(user.email || '') : false;
+    if (!isAdmin) {
       return NextResponse.json({ error: 'Unauthorized access. Admins only.' }, { status: 401 });
     }
 
@@ -22,58 +22,91 @@ export async function GET(request: Request) {
     const limit = parseInt(searchParams.get('limit') || '10', 10);
     const skip = (page - 1) * limit;
 
-    // 3. Build Prisma Conditions
-    const where: Prisma.CandidateWhereInput = {};
+    // 3. Build Supabase query with task relations
+    let query = supabase
+      .from('candidates')
+      .select('*, tasks(*)', { count: 'exact' });
 
     if (search) {
-      where.OR = [
-        { fullName: { contains: search, mode: 'insensitive' } },
-        { email: { contains: search, mode: 'insensitive' } },
-      ];
+      query = query.or(`full_name.ilike.%${search}%,email.ilike.%${search}%`);
     }
 
     if (status) {
-      where.status = status as ApplicationStatus;
+      query = query.eq('status', status);
     }
 
     if (position) {
-      where.position = position as Position;
+      query = query.eq('position', position);
     }
 
     // 4. Query DB for candidates list & totals
-    const [candidates, filteredTotal] = await Promise.all([
-      prisma.candidate.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      prisma.candidate.count({ where }),
-    ]);
+    const { data: candidates, count: filteredTotal, error: queryError } = await query
+      .order('created_at', { ascending: false })
+      .range(skip, skip + limit - 1);
+
+    if (queryError) {
+      console.error('Candidate query error:', queryError);
+      throw queryError;
+    }
 
     // 5. Gather dashboard aggregation stats
-    const statsGroup = await prisma.candidate.groupBy({
-      by: ['status'],
-      _count: {
-        id: true,
-      },
-    });
+    const { data: allCandidates, error: statsError } = await supabase
+      .from('candidates')
+      .select('status');
+
+    if (statsError) {
+      console.error('Stats fetch error:', statsError);
+      throw statsError;
+    }
 
     const stats = {
-      total: await prisma.candidate.count(),
-      pending: statsGroup.find((s) => s.status === ApplicationStatus.PENDING)?._count.id || 0,
-      reviewed: statsGroup.find((s) => s.status === ApplicationStatus.REVIEWED)?._count.id || 0,
-      shortlisted: statsGroup.find((s) => s.status === ApplicationStatus.SHORTLISTED)?._count.id || 0,
-      rejected: statsGroup.find((s) => s.status === ApplicationStatus.REJECTED)?._count.id || 0,
+      total: allCandidates?.length || 0,
+      pending: allCandidates?.filter(c => c.status === 'PENDING').length || 0,
+      reviewed: allCandidates?.filter(c => c.status === 'SHORTLISTED').length || 0,
+      shortlisted: allCandidates?.filter(c => c.status === 'SHORTLISTED').length || 0,
+      taskAssigned: allCandidates?.filter(c => c.status === 'TASK_ASSIGNED').length || 0,
+      submitted: allCandidates?.filter(c => c.status === 'SUBMITTED').length || 0,
+      rejected: allCandidates?.filter(c => c.status === 'REJECTED').length || 0,
     };
 
+    // Serialize keys to match camelCase expectations in CandidateTable.tsx
+    const serializedCandidates = (candidates || []).map((c: any) => {
+      const rawTask = c.tasks;
+      const task = rawTask ? (Array.isArray(rawTask) ? rawTask[0] : rawTask) : null;
+      
+      return {
+        id: c.id,
+        fullName: c.full_name,
+        email: c.email,
+        phone: c.phone,
+        portfolioUrl: c.portfolio_url || undefined,
+        resumeUrl: c.resume_url,
+        position: c.position,
+        yearsOfExperience: c.years_of_experience,
+        coverLetter: c.cover_letter || undefined,
+        status: c.status,
+        createdAt: c.created_at,
+        task: task ? {
+          id: task.id,
+          title: task.title,
+          instructions: task.instructions,
+          assignedAt: task.assigned_at,
+          deadline: task.deadline,
+          submissionUrl: task.submission_url || undefined,
+          submissionNotes: task.submission_notes || undefined,
+          submittedAt: task.submitted_at || undefined,
+          status: task.status,
+        } : null
+      };
+    });
+
     return NextResponse.json({
-      candidates,
+      candidates: serializedCandidates,
       pagination: {
-        total: filteredTotal,
+        total: filteredTotal || 0,
         page,
         limit,
-        totalPages: Math.ceil(filteredTotal / limit),
+        totalPages: Math.ceil((filteredTotal || 0) / limit),
       },
       stats,
     });

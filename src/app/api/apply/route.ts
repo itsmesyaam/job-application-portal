@@ -1,23 +1,16 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth/next';
-import { Position } from '@prisma/client';
-
+import { createClient as createServerClientInstance } from '@/lib/supabase/server';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { jobApplicationSchema } from '@/schemas/application';
-import { authOptions } from '../auth/[...nextauth]/route';
-import { prisma } from '@/lib/prisma';
-import { uploadResume } from '@/lib/storage';
 import { sendWelcomeEmail } from '@/lib/email';
 
-// Map frontend dropdown positions to Prisma Enum Positions
-const POSITION_MAP: Record<string, Position> = {
-  'UI/UX Designer': Position.UI_UX_DESIGNER,
-  'Full Stack Developer': Position.FULL_STACK_DEVELOPER,
-  'Mobile Developer': Position.MOBILE_DEVELOPER,
-  'Software Tester / QA': Position.TESTER,
-  'HR Manager': Position.HR,
-  'Digital Marketer': Position.DIGITAL_MARKETER,
-  'Intern': Position.INTERN,
-};
+// Create a Supabase admin client using the service role key to handle simulated demo sessions securely
+function getAdminClient() {
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+    process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  );
+}
 
 export async function POST(request: Request) {
   try {
@@ -33,18 +26,24 @@ export async function POST(request: Request) {
     const coverLetter = formData.get('coverLetter') as string;
     const resume = formData.get('resume') as File | null;
     const isDemo = formData.get('isDemo') === 'true';
-    
-    // 1. Authenticate Request
-    const session = await getServerSession(authOptions);
-    let googleId = session?.user?.googleId;
 
-    // Dev mode fallback for demo user simulation
-    if (!googleId) {
-      if (process.env.NODE_ENV === 'development' && isDemo) {
-        googleId = `demo-google-id-${email.replace(/[^a-zA-Z0-9]/g, '')}`;
+    // 1. Authenticate session
+    const supabase = await createServerClientInstance();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    let candidateId = user?.id;
+    let candidateEmail = user?.email;
+    let clientToUse = supabase;
+
+    if (!candidateId) {
+      if (isDemo) {
+        // Simulated local developer login uses a fixed dummy UUID
+        candidateId = '00000000-0000-0000-0000-000000000000';
+        candidateEmail = email || 'jane.doe@example.com';
+        clientToUse = getAdminClient();
       } else {
         return NextResponse.json(
-          { success: false, error: 'Authentication required. Please sign in with Google.' },
+          { success: false, error: 'Authentication required. Please sign in.' },
           { status: 401 }
         );
       }
@@ -53,9 +52,9 @@ export async function POST(request: Request) {
     // 2. Schema Validation (Server-side check)
     const validationResult = jobApplicationSchema.safeParse({
       fullName,
-      email,
+      email: candidateEmail,
       phoneNumber,
-      portfolioUrl,
+      portfolioUrl: portfolioUrl || undefined,
       position,
       yearsOfExperience,
       coverLetter,
@@ -72,14 +71,6 @@ export async function POST(request: Request) {
       );
     }
 
-    const mappedPosition = POSITION_MAP[position];
-    if (!mappedPosition) {
-      return NextResponse.json(
-        { success: false, error: 'Invalid position selected.' },
-        { status: 400 }
-      );
-    }
-
     if (!resume) {
       return NextResponse.json(
         { success: false, error: 'Resume file is required.' },
@@ -87,65 +78,69 @@ export async function POST(request: Request) {
       );
     }
 
-    // 3. File Upload to S3/Supabase Storage
-    let resumeUrl = '';
-    try {
-      resumeUrl = await uploadResume(resume);
-    } catch (storageError) {
-      console.error('File storage upload failed:', storageError);
+    // 3. File Upload to Supabase Storage
+    const rawExtension = resume.name.split('.').pop() || '';
+    const fileExtension = ['pdf', 'docx', 'doc'].includes(rawExtension.toLowerCase()) 
+      ? rawExtension.toLowerCase() 
+      : 'bin';
+
+    if (fileExtension === 'bin') {
       return NextResponse.json(
-        { success: false, error: 'Failed to upload resume. Please verify S3 settings.' },
+        { success: false, error: 'Malicious or unsupported file extension detected.' },
+        { status: 400 }
+      );
+    }
+
+    const fileKey = `${candidateId}/${crypto.randomUUID()}.${fileExtension}`;
+    const arrayBuffer = await resume.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // Upload directly to private bucket
+    const { data: uploadData, error: uploadError } = await clientToUse.storage
+      .from('resumes')
+      .upload(fileKey, buffer, {
+        contentType: resume.type,
+        upsert: true,
+      });
+
+    if (uploadError) {
+      console.error('Supabase Storage upload failed:', uploadError);
+      return NextResponse.json(
+        { success: false, error: 'Failed to upload resume to storage.' },
         { status: 502 }
       );
     }
 
-    // 4. Save Candidate Profile in DB using Prisma Client
-    try {
-      const candidate = await prisma.candidate.upsert({
-        where: { email },
-        update: {
-          googleId,
-          fullName,
-          phone: phoneNumber,
-          portfolioUrl: portfolioUrl || null,
-          resumeUrl,
-          position: mappedPosition,
-          yearsOfExperience: parseInt(yearsOfExperience, 10),
-          coverLetter: coverLetter || null,
-          status: 'PENDING', // Reset status on re-application
-        },
-        create: {
-          googleId,
-          fullName,
-          email,
-          phone: phoneNumber,
-          portfolioUrl: portfolioUrl || null,
-          resumeUrl,
-          position: mappedPosition,
-          yearsOfExperience: parseInt(yearsOfExperience, 10),
-          coverLetter: coverLetter || null,
-          status: 'PENDING',
-        },
+    // 4. Save/Upsert Candidate details in PostgreSQL candidates table
+    const { error: dbError } = await clientToUse
+      .from('candidates')
+      .upsert({
+        id: candidateId,
+        full_name: fullName,
+        email: candidateEmail,
+        phone: phoneNumber,
+        portfolio_url: portfolioUrl || null,
+        resume_url: uploadData.path,
+        position,
+        years_of_experience: parseInt(yearsOfExperience, 10),
+        cover_letter: coverLetter || null,
+        status: 'PENDING',
+        created_at: new Date().toISOString(),
       });
 
-      console.log('Candidate successfully saved to DB:', candidate.id);
-
-      // Dispatch Welcome Email in the background
-      const humanFriendlyPosition = Object.keys(POSITION_MAP).find(
-        (key) => POSITION_MAP[key] === candidate.position
-      ) || candidate.position;
-      
-      sendWelcomeEmail(candidate.email, candidate.fullName, humanFriendlyPosition).catch((e) =>
-        console.error('Failed to dispatch welcome email:', e)
-      );
-    } catch (dbError) {
+    if (dbError) {
       console.error('Database write failed:', dbError);
       return NextResponse.json(
         { success: false, error: 'Failed to save application to database.' },
         { status: 500 }
       );
     }
-    
+
+    // Dispatch Welcome Email in the background
+    sendWelcomeEmail(candidateEmail || '', fullName, position).catch((e) =>
+      console.error('Failed to dispatch welcome email:', e)
+    );
+
     return NextResponse.json({
       success: true,
       message: 'Application submitted successfully! Our hiring team will review your credentials and get back to you shortly.',

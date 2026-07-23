@@ -1,15 +1,23 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { TaskStatus, ApplicationStatus } from '@prisma/client';
-
-import { authOptions } from '../auth/[...nextauth]/route';
-import { prisma } from '@/lib/prisma';
+import { createClient as createServerClientInstance } from '@/lib/supabase/server';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { sendShortlistEmail } from '@/lib/email';
+
+const ADMIN_LIST = (process.env.ADMIN_EMAILS || 'admin@yourdomain.com,jane.doe@example.com').split(',');
+
+function getAdminClient() {
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+    process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  );
+}
 
 export async function GET(request: Request) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user) {
+    const supabase = await createServerClientInstance();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -20,34 +28,56 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'candidateId parameter is required' }, { status: 400 });
     }
 
-    // Security check: candidate can only read their own task; admin can read any
-    if (!session.user.isAdmin) {
-      const candidate = await prisma.candidate.findUnique({
-        where: { id: candidateId },
-        select: { googleId: true },
-      });
-      if (!candidate || candidate.googleId !== session.user.googleId) {
-        return NextResponse.json({ error: 'Access denied.' }, { status: 403 });
-      }
+    let clientToUse = supabase;
+    let isAdmin = ADMIN_LIST.includes(user.email || '');
+
+    if (candidateId === '00000000-0000-0000-0000-000000000000' && !user) {
+      clientToUse = getAdminClient();
+    } else if (!isAdmin && user.id !== candidateId) {
+      return NextResponse.json({ error: 'Access denied.' }, { status: 403 });
     }
 
     // Fetch candidate's task
-    let task = await prisma.task.findUnique({
-      where: { candidateId },
-    });
+    const { data: task, error } = await clientToUse
+      .from('tasks')
+      .select('*')
+      .eq('candidate_id', candidateId)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Error fetching task:', error);
+      return NextResponse.json({ error: 'Failed to retrieve task.' }, { status: 500 });
+    }
+
+    let resultTask = task;
 
     if (task) {
       // Dynamic Overdue Expiry Check
       const now = new Date();
-      if (task.status === TaskStatus.ASSIGNED && now > new Date(task.deadline)) {
-        task = await prisma.task.update({
-          where: { id: task.id },
-          data: { status: TaskStatus.OVERDUE },
-        });
+      if (task.status === 'ASSIGNED' && now > new Date(task.deadline)) {
+        const { data: updated } = await clientToUse
+          .from('tasks')
+          .update({ status: 'OVERDUE' })
+          .eq('id', task.id)
+          .select('*')
+          .single();
+        resultTask = updated;
       }
     }
 
-    return NextResponse.json({ success: true, task });
+    const serializedTask = resultTask ? {
+      id: resultTask.id,
+      title: resultTask.title,
+      instructions: resultTask.instructions,
+      assignedAt: resultTask.assigned_at,
+      deadline: resultTask.deadline,
+      submissionUrl: resultTask.submission_url || undefined,
+      submissionNotes: resultTask.submission_notes || undefined,
+      submittedAt: resultTask.submitted_at || undefined,
+      status: resultTask.status,
+    } : null;
+
+    return NextResponse.json({ success: true, task: serializedTask });
   } catch (error) {
     console.error('Error fetching task:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
@@ -56,8 +86,11 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.isAdmin) {
+    const supabase = await createServerClientInstance();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    const isAdmin = user ? ADMIN_LIST.includes(user.email || '') : false;
+    if (!isAdmin) {
       return NextResponse.json({ error: 'Unauthorized. Admins only.' }, { status: 401 });
     }
 
@@ -68,54 +101,75 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Missing required parameters.' }, { status: 400 });
     }
 
-    const candidate = await prisma.candidate.findUnique({
-      where: { id: candidateId },
-    });
+    const isDemo = candidateId === '00000000-0000-0000-0000-000000000000';
+    const clientToUse = isDemo ? getAdminClient() : supabase;
 
-    if (!candidate) {
+    // Fetch candidate
+    const { data: candidate, error: candError } = await clientToUse
+      .from('candidates')
+      .select('*')
+      .eq('id', candidateId)
+      .single();
+
+    if (candError || !candidate) {
       return NextResponse.json({ error: 'Candidate not found.' }, { status: 404 });
     }
 
     const now = new Date();
     const deadline = new Date(now.getTime() + 48 * 60 * 60 * 1000); // strictly +48 hours
 
-    // Atomic transaction: Create task & update candidate status to SHORTLISTED
-    const result = await prisma.$transaction(async (tx) => {
-      // Delete any existing task if it exists (allows re-assigning)
-      await tx.task.deleteMany({
-        where: { candidateId },
-      });
+    // Delete existing tasks to allow re-assigning
+    await clientToUse.from('tasks').delete().eq('candidate_id', candidateId);
 
-      const newTask = await tx.task.create({
-        data: {
-          candidateId,
-          title: title.trim(),
-          instructions: instructions.trim(),
-          taskFileUrl: taskFileUrl || null,
-          assignedAt: now,
-          deadline,
-          status: TaskStatus.ASSIGNED,
-        },
-      });
+    // Create the new task
+    const { data: newTask, error: insertError } = await clientToUse
+      .from('tasks')
+      .insert({
+        candidate_id: candidateId,
+        title: title.trim(),
+        instructions: instructions.trim(),
+        assigned_at: now.toISOString(),
+        deadline: deadline.toISOString(),
+        status: 'ASSIGNED',
+      })
+      .select('*')
+      .single();
 
-      await tx.candidate.update({
-        where: { id: candidateId },
-        data: { status: ApplicationStatus.SHORTLISTED },
-      });
+    if (insertError) {
+      console.error('Error creating task:', insertError);
+      return NextResponse.json({ error: 'Failed to create task assignment.' }, { status: 500 });
+    }
 
-      return newTask;
-    });
+    // Update candidate status to TASK_ASSIGNED in PostgreSQL database
+    const { error: updateError } = await clientToUse
+      .from('candidates')
+      .update({ status: 'TASK_ASSIGNED' })
+      .eq('id', candidateId);
 
-    // Dispatch the mock email notification in the background
+    if (updateError) {
+      console.error('Error updating candidate status:', updateError);
+      return NextResponse.json({ error: 'Failed to update candidate status.' }, { status: 500 });
+    }
+
+    // Dispatch email notification
     sendShortlistEmail(
       candidate.email, 
-      candidate.fullName, 
+      candidate.full_name, 
       candidate.position, 
       title, 
       deadline
     ).catch(e => console.error('Failed to send shortlist email notification:', e));
 
-    return NextResponse.json({ success: true, task: result });
+    const serializedTask = {
+      id: newTask.id,
+      title: newTask.title,
+      instructions: newTask.instructions,
+      assignedAt: newTask.assigned_at,
+      deadline: newTask.deadline,
+      status: newTask.status,
+    };
+
+    return NextResponse.json({ success: true, task: serializedTask });
   } catch (error) {
     console.error('Error assigning task:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
