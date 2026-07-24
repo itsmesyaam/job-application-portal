@@ -6,8 +6,13 @@ import {
   Users, Sparkles, CheckCircle2, AlertCircle, XCircle, ArrowUpDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CandidateDrawer } from './CandidateDrawer';
+import dynamic from 'next/dynamic';
 import { Toast, type ToastType } from './Toast';
+
+const CandidateDrawer = dynamic(
+  () => import('./CandidateDrawer').then((mod) => mod.CandidateDrawer),
+  { ssr: false }
+);
 
 export interface Candidate {
   id: string;

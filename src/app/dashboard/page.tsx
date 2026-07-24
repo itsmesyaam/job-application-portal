@@ -42,7 +42,7 @@ export default async function DashboardPage() {
   // 2. Fetch candidate profile details with assigned task
   const { data: candidate, error } = await supabase
     .from('candidates')
-    .select('*, tasks(*)')
+    .select('id, full_name, email, phone, portfolio_url, resume_url, position, years_of_experience, cover_letter, status, created_at, tasks(id, title, instructions, assigned_at, deadline, submission_url, submission_notes, submitted_at, status)')
     .eq('id', user.id)
     .maybeSingle();
 

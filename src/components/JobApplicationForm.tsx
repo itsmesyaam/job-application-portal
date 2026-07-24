@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useForm, FormProvider } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { 
@@ -336,11 +337,12 @@ export function JobApplicationForm() {
                     <div className="max-w-sm mx-auto p-4 rounded-xl border border-indigo-500/20 bg-indigo-500/5 flex flex-col items-center gap-3">
                       <div className="flex items-center gap-3 w-full">
                         {activeUser?.image ? (
-                          /* eslint-disable-next-line @next/next/no-img-element */
-                          <img 
+                          <Image 
                             src={activeUser.image} 
                             alt={activeUser.name || 'User'} 
-                            className="w-10 h-10 rounded-full border border-indigo-500/30"
+                            width={40}
+                            height={40}
+                            className="rounded-full border border-indigo-500/30"
                           />
                         ) : (
                           <div className="w-10 h-10 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400 font-semibold border border-indigo-500/30">
