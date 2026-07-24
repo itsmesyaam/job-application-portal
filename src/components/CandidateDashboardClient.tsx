@@ -203,7 +203,6 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
 
     setSendingMsg(true);
     try {
-      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -211,7 +210,6 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
           candidateId: candidate.id,
           content: newMessage,
           senderType: 'CANDIDATE',
-          isDemo,
         }),
       });
 
@@ -229,8 +227,7 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
 
   // Logout / Terminate Session
   const handleLogout = async () => {
-    const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
-    if (!isGlow && !isDemo) {
+    if (!isGlow) {
       await supabase.auth.signOut();
     }
     showToast('Signed out of Candidate Space.', 'info');
@@ -255,11 +252,6 @@ export function CandidateDashboardClient({ initialCandidate }: CandidateDashboar
       const formData = new FormData();
       formData.append('candidateId', candidate.id);
       formData.append('submissionNotes', submitNotes);
-      
-      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
-      if (isDemo) {
-        formData.append('isDemo', 'true');
-      }
 
       if (submitFile) {
         formData.append('file', submitFile);

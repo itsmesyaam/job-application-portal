@@ -1,16 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createClient as createServerClientInstance } from '@/lib/supabase/server';
-import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { jobApplicationSchema } from '@/schemas/application';
 import { sendWelcomeEmail } from '@/lib/email';
-
-// Create a Supabase admin client using the service role key to handle simulated demo sessions securely
-function getAdminClient() {
-  return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-    process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-  );
-}
+import crypto from 'crypto';
 
 export async function POST(request: Request) {
   try {
@@ -25,29 +17,20 @@ export async function POST(request: Request) {
     const yearsOfExperience = formData.get('yearsOfExperience') as string;
     const coverLetter = formData.get('coverLetter') as string;
     const resume = formData.get('resume') as File | null;
-    const isDemo = formData.get('isDemo') === 'true';
 
     // 1. Authenticate session
     const supabase = await createServerClientInstance();
     const { data: { user } } = await supabase.auth.getUser();
 
-    let candidateId = user?.id;
-    let candidateEmail = user?.email;
-    let clientToUse = supabase;
-
-    if (!candidateId) {
-      if (isDemo) {
-        // Simulated local developer login uses a fixed dummy UUID
-        candidateId = '00000000-0000-0000-0000-000000000000';
-        candidateEmail = email || 'jane.doe@example.com';
-        clientToUse = getAdminClient();
-      } else {
-        return NextResponse.json(
-          { success: false, error: 'Authentication required. Please sign in.' },
-          { status: 401 }
-        );
-      }
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: 'Authentication required. Please sign in.' },
+        { status: 401 }
+      );
     }
+
+    const candidateId = user.id;
+    const candidateEmail = user.email;
 
     // 2. Schema Validation (Server-side check)
     const validationResult = jobApplicationSchema.safeParse({
@@ -96,7 +79,7 @@ export async function POST(request: Request) {
     const buffer = Buffer.from(arrayBuffer);
 
     // Upload directly to private bucket
-    const { data: uploadData, error: uploadError } = await clientToUse.storage
+    const { data: uploadData, error: uploadError } = await supabase.storage
       .from('resumes')
       .upload(fileKey, buffer, {
         contentType: resume.type,
@@ -112,7 +95,7 @@ export async function POST(request: Request) {
     }
 
     // 4. Save/Upsert Candidate details in PostgreSQL candidates table
-    const { error: dbError } = await clientToUse
+    const { error: dbError } = await supabase
       .from('candidates')
       .upsert({
         id: candidateId,

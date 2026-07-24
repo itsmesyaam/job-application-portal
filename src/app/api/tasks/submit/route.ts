@@ -1,15 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient as createServerClientInstance } from '@/lib/supabase/server';
-import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { sendSubmissionConfirmEmail, sendAdminAlertEmail } from '@/lib/email';
 import crypto from 'crypto';
-
-function getAdminClient() {
-  return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-    process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-  );
-}
 
 export async function POST(request: Request) {
   try {
@@ -21,29 +13,22 @@ export async function POST(request: Request) {
     const submissionNotes = formData.get('submissionNotes') as string;
     const file = formData.get('file') as File | null;
     const url = formData.get('url') as string;
-    const isDemo = formData.get('isDemo') === 'true';
 
     if (!candidateId) {
       return NextResponse.json({ error: 'candidateId is required' }, { status: 400 });
     }
 
-    let clientToUse = supabase;
-    
     if (!user) {
-      if (isDemo && candidateId === '00000000-0000-0000-0000-000000000000') {
-        clientToUse = getAdminClient();
-      } else {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-    } else {
-      // Security check: Candidate can only submit for themselves
-      if (user.id !== candidateId) {
-        return NextResponse.json({ error: 'Access denied.' }, { status: 403 });
-      }
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Security check: Candidate can only submit for themselves
+    if (user.id !== candidateId) {
+      return NextResponse.json({ error: 'Access denied.' }, { status: 403 });
     }
 
     // Retrieve candidate profile
-    const { data: candidate, error: candError } = await clientToUse
+    const { data: candidate, error: candError } = await supabase
       .from('candidates')
       .select('full_name, email')
       .eq('id', candidateId)
@@ -54,7 +39,7 @@ export async function POST(request: Request) {
     }
 
     // Retrieve active task
-    const { data: task, error: taskError } = await clientToUse
+    const { data: task, error: taskError } = await supabase
       .from('tasks')
       .select('*')
       .eq('candidate_id', candidateId)
@@ -67,7 +52,7 @@ export async function POST(request: Request) {
     // Check if the task is already overdue
     const now = new Date();
     if (now > new Date(task.deadline)) {
-      await clientToUse
+      await supabase
         .from('tasks')
         .update({ status: 'OVERDUE' })
         .eq('id', task.id);
@@ -92,7 +77,7 @@ export async function POST(request: Request) {
       const buffer = Buffer.from(arrayBuffer);
 
       // Upload to private task-submissions bucket
-      const { data: uploadData, error: uploadError } = await clientToUse.storage
+      const { data: uploadData, error: uploadError } = await supabase.storage
         .from('task-submissions')
         .upload(fileKey, buffer, {
           contentType: file.type,
@@ -113,7 +98,7 @@ export async function POST(request: Request) {
     }
 
     // Update task record
-    const { data: updatedTask, error: updateError } = await clientToUse
+    const { data: updatedTask, error: updateError } = await supabase
       .from('tasks')
       .update({
         submission_url: submissionUrl,
@@ -131,7 +116,7 @@ export async function POST(request: Request) {
     }
 
     // Also update candidate status in db
-    await clientToUse
+    await supabase
       .from('candidates')
       .update({ status: 'SUBMITTED' })
       .eq('id', candidateId);

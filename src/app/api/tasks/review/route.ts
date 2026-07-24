@@ -1,15 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient as createServerClientInstance } from '@/lib/supabase/server';
-import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 const ADMIN_LIST = (process.env.ADMIN_EMAILS || 'admin@yourdomain.com,jane.doe@example.com').split(',');
-
-function getAdminClient() {
-  return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-    process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-  );
-}
 
 export async function POST(request: Request) {
   try {
@@ -19,7 +11,7 @@ export async function POST(request: Request) {
     const isAdmin = user ? ADMIN_LIST.includes(user.email || '') : false;
     
     const body = await request.json();
-    const { taskId, status, isDemo } = body;
+    const { taskId, status } = body;
 
     if (!taskId || !status) {
       return NextResponse.json({ error: 'Missing required parameters.' }, { status: 400 });
@@ -29,20 +21,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Invalid review status. Must be ACCEPTED or REJECTED.' }, { status: 400 });
     }
 
-    let clientToUse = supabase;
-
-    if (!user) {
-      if (isDemo) {
-        clientToUse = getAdminClient();
-      } else {
-        return NextResponse.json({ error: 'Unauthorized access.' }, { status: 401 });
-      }
-    } else if (!isAdmin) {
+    if (!user || !isAdmin) {
       return NextResponse.json({ error: 'Unauthorized access. Admins only.' }, { status: 401 });
     }
 
     // 3. Update Task Status in DB
-    const { data: updatedTask, error: updateError } = await clientToUse
+    const { data: updatedTask, error: updateError } = await supabase
       .from('tasks')
       .update({ status })
       .eq('id', taskId)
@@ -56,7 +40,7 @@ export async function POST(request: Request) {
 
     // Update candidate status accordingly
     if (status === 'REJECTED') {
-      await clientToUse
+      await supabase
         .from('candidates')
         .update({ status: 'REJECTED' })
         .eq('id', updatedTask.candidate_id);

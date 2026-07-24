@@ -1,16 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createClient as createServerClientInstance } from '@/lib/supabase/server';
-import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { sendShortlistEmail } from '@/lib/email';
 
 const ADMIN_LIST = (process.env.ADMIN_EMAILS || 'admin@yourdomain.com,jane.doe@example.com').split(',');
-
-function getAdminClient() {
-  return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-    process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-  );
-}
 
 export async function GET(request: Request) {
   try {
@@ -28,17 +20,14 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'candidateId parameter is required' }, { status: 400 });
     }
 
-    let clientToUse = supabase;
     let isAdmin = ADMIN_LIST.includes(user.email || '');
 
-    if (candidateId === '00000000-0000-0000-0000-000000000000' && !user) {
-      clientToUse = getAdminClient();
-    } else if (!isAdmin && user.id !== candidateId) {
+    if (!isAdmin && user.id !== candidateId) {
       return NextResponse.json({ error: 'Access denied.' }, { status: 403 });
     }
 
     // Fetch candidate's task
-    const { data: task, error } = await clientToUse
+    const { data: task, error } = await supabase
       .from('tasks')
       .select('*')
       .eq('candidate_id', candidateId)
@@ -55,7 +44,7 @@ export async function GET(request: Request) {
       // Dynamic Overdue Expiry Check
       const now = new Date();
       if (task.status === 'ASSIGNED' && now > new Date(task.deadline)) {
-        const { data: updated } = await clientToUse
+        const { data: updated } = await supabase
           .from('tasks')
           .update({ status: 'OVERDUE' })
           .eq('id', task.id)
@@ -95,17 +84,14 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    const { candidateId, title, instructions, taskFileUrl } = body;
+    const { candidateId, title, instructions } = body;
 
     if (!candidateId || !title?.trim() || !instructions?.trim()) {
       return NextResponse.json({ error: 'Missing required parameters.' }, { status: 400 });
     }
 
-    const isDemo = candidateId === '00000000-0000-0000-0000-000000000000';
-    const clientToUse = isDemo ? getAdminClient() : supabase;
-
     // Fetch candidate
-    const { data: candidate, error: candError } = await clientToUse
+    const { data: candidate, error: candError } = await supabase
       .from('candidates')
       .select('*')
       .eq('id', candidateId)
@@ -119,10 +105,10 @@ export async function POST(request: Request) {
     const deadline = new Date(now.getTime() + 48 * 60 * 60 * 1000); // strictly +48 hours
 
     // Delete existing tasks to allow re-assigning
-    await clientToUse.from('tasks').delete().eq('candidate_id', candidateId);
+    await supabase.from('tasks').delete().eq('candidate_id', candidateId);
 
     // Create the new task
-    const { data: newTask, error: insertError } = await clientToUse
+    const { data: newTask, error: insertError } = await supabase
       .from('tasks')
       .insert({
         candidate_id: candidateId,
@@ -141,7 +127,7 @@ export async function POST(request: Request) {
     }
 
     // Update candidate status to TASK_ASSIGNED in PostgreSQL database
-    const { error: updateError } = await clientToUse
+    const { error: updateError } = await supabase
       .from('candidates')
       .update({ status: 'TASK_ASSIGNED' })
       .eq('id', candidateId);

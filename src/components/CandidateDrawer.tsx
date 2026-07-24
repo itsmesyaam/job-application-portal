@@ -66,8 +66,7 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
     if (!candidate) return;
     setLoadingTask(true);
     try {
-      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
-      const response = await fetch(`/api/tasks?candidateId=${candidate.id}${isDemo ? '&isDemo=true' : ''}`);
+      const response = await fetch(`/api/tasks?candidateId=${candidate.id}`);
       if (!response.ok) throw new Error();
       const data = await response.json();
       if (data.success) {
@@ -164,11 +163,6 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
     if (!candidate || !isOpen) return;
 
     const getSignedUrl = async () => {
-      if (candidate.id === '00000000-0000-0000-0000-000000000000') {
-        setSignedResumeUrl(candidate.resumeUrl);
-        return;
-      }
-
       const { data, error } = await supabase.storage
         .from('resumes')
         .createSignedUrl(candidate.resumeUrl, 3600);
@@ -269,14 +263,12 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
     if (!task || reviewingTask) return;
     setReviewingTask(status);
     try {
-      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
       const response = await fetch('/api/tasks/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           taskId: task.id,
           status,
-          isDemo,
         }),
       });
 
@@ -302,7 +294,6 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
 
     setSendingMsg(true);
     try {
-      const isDemo = candidate.id === '00000000-0000-0000-0000-000000000000';
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -310,7 +301,6 @@ export function CandidateDrawer({ candidate, isOpen, onClose, onStatusChange }: 
           candidateId: candidate.id,
           content: newMessage,
           senderType: 'ADMIN',
-          isDemo,
         }),
       });
 

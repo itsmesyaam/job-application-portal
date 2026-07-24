@@ -37,8 +37,6 @@ const steps = [
 export function JobApplicationForm() {
   const [supabase] = useState(() => createClient());
   const [user, setUser] = useState<any>(null);
-  const [isDemoUser, setIsDemoUser] = useState(false);
-  const [demoProfile, setDemoProfile] = useState<{ name: string; email: string } | null>(null);
   
   const [currentStep, setCurrentStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -100,9 +98,6 @@ export function JobApplicationForm() {
       setValue('email', email, { shouldValidate: true });
 
       const timer = setTimeout(() => {
-        if (isDemoUser) {
-          setIsDemoUser(false);
-        }
         if (currentStep === 1) {
           setCurrentStep(2);
           showToast(`Welcome, ${name}! Verified details auto-filled.`, 'success');
@@ -111,7 +106,7 @@ export function JobApplicationForm() {
 
       return () => clearTimeout(timer);
     }
-  }, [user, setValue, currentStep, isDemoUser]);
+  }, [user, setValue, currentStep]);
 
   // Google Login Handler
   const handleGoogleLogin = async () => {
@@ -126,28 +121,9 @@ export function JobApplicationForm() {
     }
   };
 
-  // Demo Login Handler for testing without actual OAuth configuration
-  const handleDemoLogin = () => {
-    const mockUser = {
-      name: 'Jane Doe',
-      email: 'jane.doe@example.com',
-    };
-    setDemoProfile(mockUser);
-    setIsDemoUser(true);
-    setValue('fullName', mockUser.name, { shouldValidate: true });
-    setValue('email', mockUser.email, { shouldValidate: true });
-    setCurrentStep(2);
-    showToast('Signed in with simulated developer credentials.', 'info');
-  };
-
   const handleLogout = async () => {
-    if (isDemoUser) {
-      setIsDemoUser(false);
-      setDemoProfile(null);
-    } else {
-      await supabase.auth.signOut();
-      setUser(null);
-    }
+    await supabase.auth.signOut();
+    setUser(null);
     reset({
       fullName: '',
       email: '',
@@ -162,12 +138,10 @@ export function JobApplicationForm() {
     showToast('Signed out successfully.', 'info');
   };
 
-  const isUserAuthenticated = !!user || isDemoUser;
+  const isUserAuthenticated = !!user;
   const activeUser = user 
     ? { name: user.user_metadata?.full_name || user.email?.split('@')[0], email: user.email, image: user.user_metadata?.avatar_url } 
-    : demoProfile 
-      ? { name: demoProfile.name, email: demoProfile.email, image: null } 
-      : null;
+    : null;
 
   const isAdmin = activeUser?.email === 'admin@yourdomain.com' || activeUser?.email === 'jane.doe@example.com';
 
@@ -177,7 +151,7 @@ export function JobApplicationForm() {
     
     if (currentStep === 1) {
       if (!isUserAuthenticated) {
-        showToast('Please sign in to proceed to the next step.', 'error');
+        showToast('Please sign in with Google to proceed to the next step.', 'error');
         return;
       }
       setCurrentStep(2);
@@ -215,10 +189,6 @@ export function JobApplicationForm() {
       formData.append('yearsOfExperience', String(data.yearsOfExperience));
       formData.append('coverLetter', data.coverLetter);
       
-      if (isDemoUser) {
-        formData.append('isDemo', 'true');
-      }
-      
       // Extract FileList or File
       if (data.resume) {
         if (data.resume instanceof FileList && data.resume.length > 0) {
@@ -245,7 +215,7 @@ export function JobApplicationForm() {
           origin: { y: 0.6 }
         });
 
-        // Reset form and go back to step 1 (or show success screen)
+        // Reset form and go back to step 1
         setTimeout(() => {
           reset();
           handleLogout();
@@ -360,23 +330,6 @@ export function JobApplicationForm() {
                           />
                         </svg>
                         Sign in with Google
-                      </motion.button>
-
-                      <div className="flex items-center gap-2 py-1">
-                        <div className="flex-1 h-[1px] bg-slate-800" />
-                        <span className="text-xs text-slate-500 font-medium">OR</span>
-                        <div className="flex-1 h-[1px] bg-slate-800" />
-                      </div>
-
-                      {/* Simulation Button for Local Testing */}
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        type="button"
-                        onClick={handleDemoLogin}
-                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 px-4 rounded-xl shadow-[0_0_15px_rgba(99,102,241,0.2)] hover:shadow-[0_0_20px_rgba(99,102,241,0.4)] transition-all cursor-pointer text-sm"
-                      >
-                        Simulate Demo Login (No Setup Required)
                       </motion.button>
                     </div>
                   ) : (
